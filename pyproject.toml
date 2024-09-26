@@ -1,0 +1,14 @@
+[project]
+name = "sags"
+version = "0.0.0"
+
+dependencies=[
+    "nerfstudio"
+]
+
+
+[tool.setuptools.packages.find]
+include = ["sags*"]
+
+[project.entry-points.'nerfstudio.method_configs']
+sags = 'sags.sags_config:sags'
