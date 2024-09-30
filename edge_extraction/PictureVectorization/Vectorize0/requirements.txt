@@ -1,0 +1,8 @@
+opencv-python
+numpy
+matplotlib
+scikit-learn
+scikit-image
+svgpathtools
+tqdm
+seaborn
