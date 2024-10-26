@@ -46,6 +46,9 @@ class SagsDataparserOutput(DataparserOutputs):
 
     color_filenames: Optional[List[Path]] = None
     """This is a semantic color for visualization"""
+    
+    masks_path: Path = Path("masks") # Optional[Path] = None
+    """Path to masks directory. If not set, masks are not loaded."""
 
 @dataclass
 class SagsDataParserConfig(DataParserConfig):
@@ -54,9 +57,9 @@ class SagsDataParserConfig(DataParserConfig):
     _target: Type = field(default_factory=lambda: SagsDataParser)
     """target class to instantiate"""
     
-    load_pretrained_gs: bool = True
+    load_pretrained_gs: bool = False
     """If we need to load pretained Gaussian"""
-    gaussian_path: Path = Path("splat.ply")
+    gaussian_path: Path = Path("sparse_pc.ply")
     """3D gaussian checkpoint location"""
     data: Path = Path()
     """Directory or explicit json file path specifying location of data. It should be a torch tensor dicts"""
@@ -96,17 +99,17 @@ class SagsDataParserConfig(DataParserConfig):
     """Scales the depth values to meters. Default value is 0.001 for a millimeter to meter conversion."""
     images_path: Path = Path("images")
     """Path to images directory relative to the data path."""
-    masks_path: Path = Path("masks")
+    masks_path: Path = Path("masks") # Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
-    feature_path: Path = Path("features")
+    depths_path: Optional[Path] = None
     """Path to depth maps directory. If not set, depths are not loaded."""
-    color_path: Path = Path("colors")
+    color_path: Optional[Path] = None
     """Path used for visualization in the viser (I suspect)"""
     colmap_path: Path = Path("colmap/sparse/0")
     """Path to the colmap reconstruction directory relative to the data path."""
     max_2D_matches_per_3D_point: int = 0
     """Maximum number of 2D matches per 3D point. If set to -1, all 2D matches are loaded. If set to 0, no 2D matches are loaded."""
-    shape_path: Path = Path("shapes")
+    shape_path: Optional[Path] = None
     """Path to shapes for each scene. If not set, shapes are not loaded. xyh"""
     linear_map_path: Path = Path("linear_map")
     """Path to linear maps for each frame. If not set, linear maps are not loaded. xyh"""
@@ -181,15 +184,30 @@ class SagsDataParser(DataParser):
 
             frame = {
                 "file_path": (self.config.data / self.config.images_path / im_data.name).as_posix(),
-                "mask_path": (self.config.data / self.config.masks_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
-                "feature_path": (self.config.data / self.config.feature_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
-                "color_path": (self.config.data / self.config.color_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
                 "transform_matrix": c2w,
                 "colmap_im_id": im_id,
-                "shape_path": (self.config.data / self.config.shape_path / (im_data.name.split('.')[0]+'.npz')).as_posix(), #xyh
-                "linear_map_path": (self.config.data / self.config.linear_map_path / (im_data.name+'.svg')).as_posix() #xyh, per frame. If per scene, use 'im_data.name.split('.')[0] instead.
             }
             frame.update(cameras[im_data.camera_id])
+            if self.config.masks_path is not None:
+                frame["mask_path"] = (
+                    (self.config.data / self.config.masks_path / (im_data.name.split('.')[0]+'.npy')).as_posix()
+                )
+            if self.config.depths_path is not None:
+                frame["depths_path"] = (
+                    (self.config.data / self.config.depths_path / (im_data.name.split('.')[0]+'.npz')).as_posix()
+                )
+            if self.config.color_path is not None:
+                frame["color_path"] = (
+                    (self.config.data / self.config.color_path / (im_data.name.split('.')[0]+'.npz')).as_posix()
+                )
+            if self.config.linear_map_path is not None:
+                frame["linear_map_path"] = (
+                    (self.config.data / self.config.linear_map_path / (im_data.name+'.svg')).as_posix() # xyh, per frame. If per scene, use 'im_data.name.split('.')[0] instead.
+                )
+            if self.config.shape_path is not None:
+                frame["shape_path"] = (
+                    (self.config.data / self.config.shape_path / (im_data.name.split('.')[0]+'.npz')).as_posix() # xyh
+                )
             frames.append(frame)
             if camera_model is not None:
                 assert camera_model == frame["camera_model"], "Multiple camera models are not supported"
@@ -301,8 +319,8 @@ class SagsDataParser(DataParser):
             poses.append(frame["transform_matrix"])
             if "mask_path" in frame:
                 mask_filenames.append(Path(frame["mask_path"]))
-            if "feature_path" in frame:
-                feature_filenames.append(Path(frame["feature_path"]))
+            if "depths_path" in frame:
+                feature_filenames.append(Path(frame["depths_path"]))
             if "color_path" in frame:
                 color_filenames.append(Path(frame["color_path"]))
 
@@ -336,8 +354,8 @@ class SagsDataParser(DataParser):
 
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
-        color_filenames = [color_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
-        feature_filenames = [feature_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
+        color_filenames = [color_filenames[i] for i in indices] if len(color_filenames) > 0 else []
+        feature_filenames = [feature_filenames[i] for i in indices] if len(feature_filenames) > 0 else []
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         poses = poses[idx_tensor]
@@ -398,7 +416,7 @@ class SagsDataParser(DataParser):
             color_filenames=color_filenames,
             dataparser_scale=scale_factor,
             dataparser_transform=transform_matrix,
-            metadata=metadata
+            metadata=metadata,
         )
         # meta data includes the Gaussian we want to use
         return dataparser_outputs

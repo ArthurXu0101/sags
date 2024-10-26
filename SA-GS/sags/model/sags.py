@@ -25,6 +25,8 @@ from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
+from pathlib import Path
+import csv
 from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
 
 try:
@@ -184,6 +186,9 @@ class SagsConfig(ModelConfig):
     """
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
+    perplexity_path: Path = Path("/data/butian/GauUscene/GauU_Scene/CUHK_LOWER_CAMPUS_COLMAP/fake_geometric_complexity.csv")
+    """geometry comlexity csv file location"""
+    
 
 
 class Sags(Model):
@@ -787,6 +792,7 @@ class Sags(Model):
         self.radii = info["radii"][0]  # [N]
         self.gaussian_ids = info["gaussian_ids"]
         self.flatten_ids = info["flatten_ids"]
+        self.Means2D = info["means2d"]
         alpha = alpha[:, ...]
 
         background = self._get_background_color()
@@ -947,16 +953,19 @@ class Sags(Model):
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
-        assert "mask" in batch, "batch['mask']: (H, W, 1) not found during loss calculation." # batch["mask"] : [H, W, 1]
-        mask = self._downscale_if_required(batch["mask"])
+        assert "masks" in batch, "batch['masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
+        mask = self._downscale_if_required(batch["masks"])
         mask = mask.to(self.device)
 
         # calculate loss1
         assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
-        gt_img_with_mask = gt_img * mask
-        pred_img_with_mask = pred_img * mask
-        Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
+        # gt_img_with_mask = gt_img * mask
+        # pred_img_with_mask = pred_img * mask
+        # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
 
+        Ll1 = torch.abs(gt_img - pred_img).mean()
+        if Ll1.dim()== 0:
+            Ll1 = Ll1.unsqueeze(0)
         # calculate the intensity img from depth img, the intensity is used for loss2
         
         # calculate loss2
@@ -965,13 +974,16 @@ class Sags(Model):
         real_shape_dict = self._get_real_shape()
 
 
-        total_diff = torch.zeros((3,), dtype=torch.float) # shape(3,)
-        for gs_id in self.gaussian_ids:
-            one_diff = torch.abs(expected_shape_dict[gs_id] - real_shape_dict[gs_id])
-            total_diff += one_diff
+        total_diff = torch.zeros((3,), dtype=torch.float, device=self.device) # shape(3,)
+        if len(self.gaussian_ids)>0:
+            for gs_id in self.gaussian_ids:
+                gs_key = gs_id.item()
+                one_diff = torch.abs(expected_shape_dict[gs_key] - real_shape_dict[gs_key])
+                total_diff += one_diff
 
-        Ll2 = total_diff / len(self.gaussian_ids)
-
+            Ll2 = total_diff / len(self.gaussian_ids)
+        else:
+            Ll2 =torch.zeros((3,),dtype=torch.float, device=self.device)
         # not used: 
         # depth_img = outputs["depth"]
         # intensity_img = self._get_intensity_matrix(depth_img)
@@ -991,13 +1003,29 @@ class Sags(Model):
             )
             scale_reg = 0.1 * scale_reg.mean()
         else:
-            scale_reg = torch.tensor(0.0).to(self.device)
+            scale_reg = torch.tensor(0.0, device=self.device).unsqueeze(0)
+            
+        ##################### Shape Regularization #######################
+        perplexity = self.form_perplexity_tensor(self.perplexity_path)
+        ##################### Shape Regularization #######################
+            
+        ############################################################################################
+        # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
+        ############################################################################################
+        try:
+            shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, scalings=self.scales)
+        except:
+            print("shape loss out of bound")
+            
+        ############################################################################################
+        # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
+        ############################################################################################
         
         loss_dict = {
             "loss1": Ll1,
             "loss2": Ll2,
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
-            "scale_reg": scale_reg
+            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss + self.config.ssim_lambda * shape_loss,
+            "scale_reg": scale_reg,
         }
 
 
@@ -1054,3 +1082,81 @@ class Sags(Model):
         images_dict = {"img": combined_rgb}
 
         return metrics_dict, images_dict
+    
+    def form_perplexity_tensor(perplexity_path: str) -> torch.Tensor:
+    
+    # Open the file
+        with open(perplexity_path, mode='r') as file:
+            # Create a CSV reader object
+            csv_reader = csv.reader(file)
+
+            # Skip the header if it exists
+            next(csv_reader)
+
+            # Fetch the second row
+            second_row = next(csv_reader)  # This assumes the first call of next() skipped the header
+            second_row = [float(item) for item in second_row]
+
+            perplexity = torch.tensor(second_row)
+            return perplexity
+        
+        
+    def shape_constrain_loss(perplexity: torch.Tensor, semantic_mask: torch.Tensor, Means2D: torch.Tensor, scalings: torch.Tensor, k1=3, k2=1):
+        '''
+        Calculate a shape constraint loss based on the description provided.
+        
+        Arguments:
+        - perplexity: Tensor containing perplexity values.
+        - semantic_mask: Tensor of semantic masks.
+        - Means2D: Tensor containing means, assumed to be of shape [n, 2] where each row is [x, y].
+        - scalings: Tensor of scalings for Gaussian models.
+        - k1, k2: Scaling factors for the loss components.
+        '''
+
+        # Ensure all tensors are on the same device, ideally 'cuda' for GPU acceleration
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        perplexity = perplexity.to(device)
+        semantic_mask = semantic_mask.to(device)
+        Means2D = Means2D.to(device)
+        scalings = scalings.to(device)
+
+        # Filter valid Gaussians, assuming Means2D is [n, 2] and all are valid if not exactly [0,0] (0, 0) is the initial value
+        # Calculate valid_indices considering [0,0] at the center of semantic_mask
+        valid_indices = ~(torch.all(Means2D == torch.tensor([0.0, 0.0], device=device), dim=1)) & \
+                        (Means2D[:, 0] >= -semantic_mask.shape[0]//2) & (Means2D[:, 0] < semantic_mask.shape[0]//2) & \
+                        (Means2D[:, 1] >= -semantic_mask.shape[1]//2) & (Means2D[:, 1] < semantic_mask.shape[1]//2)
+
+        valid_means = Means2D[valid_indices]
+
+        # Convert mean coordinates to integer indices, ensuring they are within bounds
+        x = valid_means[:, 0].long() + semantic_mask.shape[0] // 2
+        y = valid_means[:, 1].long() + semantic_mask.shape[1] // 2
+
+
+        # Get masks and filter out -1 (indicating no calculation needed)
+        assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
+        assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
+
+        mask = semantic_mask[x, y]  # Note the order of indices [x,y]
+        valid_mask_indices = mask != -1
+        mask = mask[valid_mask_indices].long()
+
+        if mask.numel() == 0:
+            return torch.tensor(0.0, device=device)  # No valid data points to process
+
+        # Get valid perplexities using mask
+        p = perplexity[mask]
+
+        # Filter valid scalings based on the mask
+        valid_scalings = scalings[valid_indices][valid_mask_indices]
+        a1 = valid_scalings[:, 0] / valid_scalings[:, 1]
+        a2 = valid_scalings[:, 0] / valid_scalings[:, 2]
+
+        # Compute the loss for each valid Gaussian
+        loss_per_gaussian = torch.sigmoid(k1 / p - a1) + torch.sigmoid(k2 / p - a2)
+
+        # Return the average loss or handle cases where there are no valid Gaussians
+        return loss_per_gaussian.mean() if loss_per_gaussian.numel() > 0 else torch.tensor(0.0, device=device)
+    # Example usage:
+    # Assume you have initialized the tensors `perplexity`, `semantic_mask`, `Means2D`, and `scalings` appropriately.
+    # Call shape_constrain_loss(None, perplexity_tensor, semantic_mask_tensor, means2D_tensor, scalings_tensor)

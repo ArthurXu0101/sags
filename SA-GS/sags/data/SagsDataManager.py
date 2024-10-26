@@ -29,17 +29,18 @@ from functools import cached_property
 from pathlib import Path
 from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin
 
+import os
 import cv2
 import fpsample
 import numpy as np
 import torch
 from rich.progress import track
 from torch.nn import Parameter
-from typing_extensions import assert_never
+from typing_extensions import assert_never, TypeVar
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.configs.dataparser_configs import AnnotatedDataParserUnion
-from nerfstudio.data.datamanagers.base_datamanager import DataManager, TDataset
+from nerfstudio.data.datamanagers.base_datamanager import DataManager #, TDataset
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from sags.data.SagsDataParser import SagsDataParserConfig
 from sags.data.SagsDataset import SagsDataset
@@ -81,6 +82,7 @@ class SagsDataManagerConfig(FullImageDatamanagerConfig):
     """The number of iterations before one resets fps sampler repeatly, which is essentially drawing fps_reset_every
     samples from the pool of all training cameras without replacement before a new round of sampling starts."""
 
+TDataset = TypeVar("TDataset", bound=SagsDataset, default=SagsDataset)
 
 class SagsDataManager(DataManager, Generic[TDataset]):
     """
@@ -90,8 +92,8 @@ class SagsDataManager(DataManager, Generic[TDataset]):
     """
 
     config: SagsDataManagerConfig
-    train_dataset: TDataset
-    eval_dataset: TDataset
+    train_dataset: SagsDataset
+    eval_dataset: SagsDataset
 
     def __init__(
         self,
@@ -122,7 +124,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
-        if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
+        if len(self.train_dataset) > 1000 and self.config.cache_images == "gpu":
             CONSOLE.print(
                 "Train dataset has over 500 images, overriding cache_images to cpu",
                 style="bold yellow",
@@ -197,13 +199,14 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         # Which dataset?
         if split == "train":
             dataset = self.train_dataset
+            #_dataset = self._train_dataset
         elif split == "eval":
             dataset = self.eval_dataset
         else:
             assert_never(split)
 
         def undistort_idx(idx: int) -> Dict[str, torch.Tensor]:
-            data = dataset.get_data(idx, image_type=self.config.cache_images_type)
+            data = dataset.get_sags_data(idx, image_type=self.config.cache_images_type)
             camera = dataset.cameras[idx].reshape(())
             assert data["image"].shape[1] == camera.width.item() and data["image"].shape[0] == camera.height.item(), (
                 f'The size of image ({data["image"].shape[1]}, {data["image"].shape[0]}) loaded '
@@ -218,8 +221,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
             data["image"] = torch.from_numpy(image)
             if mask is not None:
-                data["mask"] = mask
-
+                data["masks"] = mask
             dataset.cameras.fx[idx] = float(K[0, 0])
             dataset.cameras.fy[idx] = float(K[1, 1])
             dataset.cameras.cx[idx] = float(K[0, 2])
@@ -229,7 +231,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             return data
 
         CONSOLE.log(f"Caching / undistorting {split} images")
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             undistorted_images = list(
                 track(
                     executor.map(
@@ -346,6 +348,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             self.train_unseen_cameras = self.sample_train_cameras()
 
         data = self.cached_train[image_idx]
+        data = data.copy()
         data["image"] = data["image"].to(self.device)
 
         assert len(self.train_cameras.shape) == 1, "Assumes single batch dimension"
@@ -382,8 +385,9 @@ def _undistort_image(
     camera: Cameras, distortion_params: np.ndarray, data: dict, image: np.ndarray, K: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, Optional[torch.Tensor]]:
     mask = None
-    assert camera.camera_type.item() == CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type."
-    assert distortion_params[3] == 0, (
+    #TODO
+    assert camera.camera_type.item() != CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." #test for now
+    assert distortion_params[3] != 0, (  # test for now
             "We doesn't support the 4th Brown parameter for image undistortion, "
             "Only k1, k2, k3, p1, p2 can be non-zero."
     )
@@ -414,11 +418,11 @@ def _undistort_image(
     image = image[y : y + h, x : x + w]
     if "depth_image" in data:
         data["depth_image"] = data["depth_image"][y : y + h, x : x + w]
-    if "mask" in data:
-        mask = data["mask"].numpy()
+    if "masks" in data:
+        mask = data["masks"].numpy()
         #mask = mask.astype(np.uint8) * 255
         assert mask.dtype == np.uint8, "expected uint8 format in mask."
-        assert len(mask.shape) == 2, "expected shape (H*W)." #xyh
+        #assert len(mask.shape) == 2, "expected shape (H*W)." #xyh
         if np.any(distortion_params):
             mask = cv2.undistort(mask, K, distortion_params, None, newK)  # type: ignore
         mask = mask[y : y + h, x : x + w]
