@@ -36,6 +36,7 @@ except ImportError:
 from gsplat.cuda_legacy._wrapper import num_sh_bases
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
+from nerfstudio.data.scene_box import OrientedBox
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras
@@ -722,6 +723,14 @@ class Sags(Model):
                 )
         else:
             crop_ids = None
+        
+        if crop_ids is not None:
+            print(f"crop_ids: {crop_ids}, sum: {crop_ids.sum()}")
+            if crop_ids.sum() == 0:
+                print("Warning: No points within the crop box, returning empty outputs.")
+                return self.get_empty_outputs(
+                    int(camera.width.item()), int(camera.height.item()), self.background_color
+                )
 
         if crop_ids is not None:
             opacities_crop = self.opacities[crop_ids]
@@ -775,7 +784,7 @@ class Sags(Model):
             width=W,
             height=H,
             tile_size=BLOCK_WIDTH,
-            packed=False,
+            packed=True,
             near_plane=0.01,
             far_plane=1e10,
             render_mode=render_mode,
@@ -786,6 +795,8 @@ class Sags(Model):
             # set some threshold to disregrad small gaussians for faster rendering.
             # radius_clip=3.0,
         )
+        if "gaussian_ids" not in info or info["gaussian_ids"] is None:
+            raise ValueError("The rasterization function did not produce valid 'gaussian_ids'.")
         if self.training and info["means2d"].requires_grad:
             info["means2d"].retain_grad()
         self.xys = info["means2d"]  # [1, N, 2]
@@ -894,49 +905,85 @@ class Sags(Model):
         real_shape_dict = {}
 
         for gs_id in self.gaussian_ids:
-            flatten_id = self.flatten_ids[gs_id]
-            real_shape_dict[gs_id] = self.scales[flatten_id] # is it in format (label, x/y, x/z)? Perhaps need modification here.
-        
+            gs_key = gs_id.item()
+            if 0 <= gs_key < len(self.flatten_ids):
+                flatten_id = self.flatten_ids[gs_id]
+                if 0 <= flatten_id.item() < len(self.scales):
+                    real_shape_dict[gs_key] = self.scales[flatten_id] # is it in format (label, x/y, x/z)? Perhaps need modification here.
+                else:
+                    real_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+            else:
+                real_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
         return real_shape_dict
     
     def _get_expected_shape(self, mask_with_shape:torch.tensor) -> Dict:
         ''' Establish a dictionary where gaussian_ids are keys to query their expected shapes in format (label, x/y, x/z)
-        
         Args: 
-            mask_with_shape: a tensor obj of (H,W,3).
-        
+            mask_with_shape: a tensor obj of (H, W, 3).
         Outputs:
             expected_shape_dict: a dictionary where gaussian_ids are keys and their shapes of (label, x/y, x/z) are values.
         '''
-        assert self.gaussian_ids != None, "Empty gaussian_ids during evaluation."
-        
+        assert self.gaussian_ids is not None, "Empty gaussian_ids during evaluation."
         expected_shape_dict = {}
 
         for gs_id in self.gaussian_ids:
-            flatten_id = self.flatten_ids[gs_id]
-            means2d_id = self.xys[flatten_id]
-            expected_shape_dict[gs_id] = mask_with_shape[means2d_id]
+            gs_key = gs_id.item()
+            # Ensure gs_id is within the correct range
+            if 0 <= gs_key < len(self.flatten_ids):
+                flatten_id = self.flatten_ids[gs_id]
+                # Ensure flatten_id is within bounds for self.xys
+                if 0 <= flatten_id.item() < len(self.xys):
+                    means2d_id = self.xys[flatten_id].long()  # Ensure tensor is of long type for indexing
+            
+                    # Ensure means2d_id is within bounds for mask_with_shape
+                    if 0 <= means2d_id[0].item() < mask_with_shape.shape[0] and 0 <= means2d_id[1].item() < mask_with_shape.shape[1]:
+                        # Convert means2d_id to integer indices
+                        row_idx = means2d_id[0].item()
+                        col_idx = means2d_id[1].item()
+                        # Index into mask_with_shape
+                        expected_shape_dict[gs_key] = mask_with_shape[row_idx, col_idx]
+                    else:
+                        expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+                else:
+                    expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+            else:
+                expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
 
         return expected_shape_dict
 
     def _get_mask_with_shape(self, mask:torch.tensor) -> torch.Tensor:
-        ''' Create a (H,W,3) mask where "3" implys label, x/y, x/z accordingly. Used for evaluation.
-
+        ''' Create a (H, W, 3) mask where "3" implies label, x/y, x/z accordingly. Used for evaluation.
+    
         Args:
-            mask: a tensor obj in shape of (H,W,1).
-        
+            mask: a tensor object in shape of (H, W, 1).
+    
         Outputs: 
-            mask_with_shape: a tensor obj (H,W,3).
+            mask_with_shape: a tensor object in shape of (H, W, 3).
         '''
-        mask_with_shape = torch.zeros((mask.shape[:2]+(3,)), dtype=torch.float)
-        mask_with_shape[:,:,0] = mask.squeeze(-1) # copy labels in mask to the new mask
-        H = mask_with_shape.shape(0)
-        W = mask_with_shape.shape(1)
-        for h in range(H):
-            for w in range(W):
-                x,y,z = self.means[(h,w)] #query 3d location by (h,w) on mask
-                mask_with_shape[(h,w,1)] = x/y
-                mask_with_shape[(h,w,2)] = x/z
+        # Initialize the mask_with_shape tensor
+        mask_with_shape = torch.zeros((mask.shape[0], mask.shape[1], 3), dtype=torch.float, device=mask.device)
+        mask_with_shape[:, :, 0] = mask.squeeze(-1)  # Copy labels in mask to the new mask
+    
+        # Flatten the H, W indices to create a 1D index tensor
+        H, W = mask.shape[:2]
+        indices = torch.arange(H * W, device=mask.device).view(H, W)
+    
+        # Ensure means tensor is properly expanded or truncated to match H * W if necessary
+        means_padded = torch.zeros((H * W, 3), device=self.means.device, dtype=self.means.dtype)
+    
+        if self.means.shape[0] >= H * W:
+            means_padded = self.means[:H * W]  
+        else:
+            means_padded[:self.means.shape[0]] = self.means  
+    
+        # Extract x, y, z values from means tensor
+        x_values = means_padded[:, 0].view(H, W)
+        y_values = means_padded[:, 1].view(H, W)
+        z_values = means_padded[:, 2].view(H, W)
+    
+        # Compute x/y and x/z and assign them to the mask_with_shape tensor
+        mask_with_shape[:, :, 1] = x_values / (y_values + 1e-8)  
+        mask_with_shape[:, :, 2] = x_values / (z_values + 1e-8)
 
         return mask_with_shape
     
@@ -962,20 +1009,23 @@ class Sags(Model):
         # gt_img_with_mask = gt_img * mask
         # pred_img_with_mask = pred_img * mask
         # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
+        
+        gt_img_with_mask = gt_img * mask
+        pred_img_with_mask = pred_img * mask
 
-        Ll1 = torch.abs(gt_img - pred_img).mean()
-        if Ll1.dim()== 0:
+        Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
+        if Ll1.dim() == 0:
             Ll1 = Ll1.unsqueeze(0)
         # calculate the intensity img from depth img, the intensity is used for loss2
-        
+
         # calculate loss2
-        
+
         expected_shape_dict = self._get_expected_shape(self._get_mask_with_shape(mask))
         real_shape_dict = self._get_real_shape()
 
 
         total_diff = torch.zeros((3,), dtype=torch.float, device=self.device) # shape(3,)
-        if len(self.gaussian_ids)>0:
+        if len(self.gaussian_ids) > 0:
             for gs_id in self.gaussian_ids:
                 gs_key = gs_id.item()
                 one_diff = torch.abs(expected_shape_dict[gs_key] - real_shape_dict[gs_key])
@@ -983,7 +1033,7 @@ class Sags(Model):
 
             Ll2 = total_diff / len(self.gaussian_ids)
         else:
-            Ll2 =torch.zeros((3,),dtype=torch.float, device=self.device)
+            Ll2 = torch.zeros((3,), dtype=torch.float, device=self.device)
         # not used: 
         # depth_img = outputs["depth"]
         # intensity_img = self._get_intensity_matrix(depth_img)
@@ -1060,7 +1110,7 @@ class Sags(Model):
             outputs: Outputs of the model.
 
         Returns:
-            A dictionary of metrics.
+            A dictionary of metric.
         """
         gt_rgb = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         predicted_rgb = outputs["rgb"]
