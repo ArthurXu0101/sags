@@ -42,6 +42,30 @@ sags = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=0.0005, eps=1e-15),
                 "scheduler": None,
             },
+            "means":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
+            "scales":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
+            "quats":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
+            "features_dc":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
+            "features_rest":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
+            "opacities":{
+                "optimizer": AdamOptimizerConfig(lr=0.0001, eps=1e-15),
+                "scheduler": None,
+            },
         },
         viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
         vis="viewer_legacy+tensorboard",

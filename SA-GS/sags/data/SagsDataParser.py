@@ -46,6 +46,9 @@ class SagsDataparserOutput(DataparserOutputs):
 
     color_filenames: Optional[List[Path]] = None
     """This is a semantic color for visualization"""
+    
+    semantic_masks_filenames: Path = Path("masks") # Optional[Path] = None
+    """Path to masks directory. If not set, masks are not loaded."""
 
 @dataclass
 class SagsDataParserConfig(DataParserConfig):
@@ -54,9 +57,9 @@ class SagsDataParserConfig(DataParserConfig):
     _target: Type = field(default_factory=lambda: SagsDataParser)
     """target class to instantiate"""
     
-    load_pretrained_gs: bool = True
+    load_pretrained_gs: bool = False
     """If we need to load pretained Gaussian"""
-    gaussian_path: Path = Path("splat.ply")
+    gaussian_path: Path = Path("sparse_pc.ply")
     """3D gaussian checkpoint location"""
     data: Path = Path()
     """Directory or explicit json file path specifying location of data. It should be a torch tensor dicts"""
@@ -96,17 +99,22 @@ class SagsDataParserConfig(DataParserConfig):
     """Scales the depth values to meters. Default value is 0.001 for a millimeter to meter conversion."""
     images_path: Path = Path("images")
     """Path to images directory relative to the data path."""
-    masks_path: Path = Path("masks")
+    masks_path: Optional[Path] = None # Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
-    feature_path: Path = Path("features")
+    semantic_masks_path: Path = Path("masks")
+    """Path to semantic masks directory. If not set, masks are not loaded."""
+    depths_path: Optional[Path] = None
     """Path to depth maps directory. If not set, depths are not loaded."""
-    color_path: Path = Path("colors")
+    color_path: Optional[Path] = None
     """Path used for visualization in the viser (I suspect)"""
     colmap_path: Path = Path("colmap/sparse/0")
     """Path to the colmap reconstruction directory relative to the data path."""
+    load_3D_points: bool = True
+    """Whether to load the 3D points from the colmap reconstruction. This is helpful for Gaussian splatting and
+    generally unused otherwise, but it's typically harmless so we default to True."""
     max_2D_matches_per_3D_point: int = 0
     """Maximum number of 2D matches per 3D point. If set to -1, all 2D matches are loaded. If set to 0, no 2D matches are loaded."""
-    shape_path: Path = Path("shapes")
+    shape_path: Optional[Path] = None
     """Path to shapes for each scene. If not set, shapes are not loaded. xyh"""
     linear_map_path: Path = Path("linear_map")
     """Path to linear maps for each frame. If not set, linear maps are not loaded. xyh"""
@@ -121,6 +129,7 @@ class SagsDataParser(DataParser):
         masks/ #  folder containing masks for each image [name.npz (B, H, W)]
         features/ # folder containing depth maps for each image [name.npz (B+1, C)]
         shapes/ # folder containing expected shapes for each scene [name.npz (M*3)]
+        semantic_masks/ # folder containing semantic_masks for each image [name.npz (B, H, W)]
     The paths can be different and can be specified in the config. (e.g., sparse/0 -> sparse)
     Currently, most COLMAP camera models are supported except for the FULL_OPENCV and THIN_PRISM_FISHEYE models.
 
@@ -181,15 +190,34 @@ class SagsDataParser(DataParser):
 
             frame = {
                 "file_path": (self.config.data / self.config.images_path / im_data.name).as_posix(),
-                "mask_path": (self.config.data / self.config.masks_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
-                "feature_path": (self.config.data / self.config.feature_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
-                "color_path": (self.config.data / self.config.color_path / (im_data.name.split('.')[0]+'.npz')).as_posix(),
                 "transform_matrix": c2w,
                 "colmap_im_id": im_id,
-                "shape_path": (self.config.data / self.config.shape_path / (im_data.name.split('.')[0]+'.npz')).as_posix(), #xyh
-                "linear_map_path": (self.config.data / self.config.linear_map_path / (im_data.name+'.svg')).as_posix() #xyh, per frame. If per scene, use 'im_data.name.split('.')[0] instead.
             }
             frame.update(cameras[im_data.camera_id])
+            if self.config.semantic_masks_path is not None:
+                frame["semantic_masks_path"] = (
+                    (self.config.data / self.config.semantic_masks_path / (im_data.name.split('.')[0]+'.npy')).as_posix()
+                )
+            if self.config.depths_path is not None:
+                frame["depths_path"] = (
+                    (self.config.data / self.config.depths_path / (im_data.name.split('.')[0]+'.npz')).as_posix()
+                )
+            if self.config.color_path is not None:
+                frame["color_path"] = (
+                    (self.config.data / self.config.color_path / (im_data.name.split('.')[0]+'.npz')).as_posix()
+                )
+            if self.config.linear_map_path is not None:
+                frame["linear_map_path"] = (
+                    (self.config.data / self.config.linear_map_path / (im_data.name+'.svg')).as_posix() # xyh, per frame. If per scene, use 'im_data.name.split('.')[0] instead.
+                )
+            if self.config.shape_path is not None:
+                frame["shape_path"] = (
+                    (self.config.data / self.config.shape_path / (im_data.name.split('.')[0]+'.npz')).as_posix() # xyh
+                )
+            if self.config.masks_path is not None:
+                frame["masks_path"] = (
+                    (self.config.data / self.config.masks_path / (im_data.name.split('.')[0]+'.npy')).as_posix()
+                )
             frames.append(frame)
             if camera_model is not None:
                 assert camera_model == frame["camera_model"], "Multiple camera models are not supported"
@@ -205,7 +233,6 @@ class SagsDataParser(DataParser):
             applied_transform[2, :] *= -1
             out["applied_transform"] = applied_transform.tolist()
         out["camera_model"] = camera_model
-        out["masks_filename"] = self.config
         assert len(frames) > 0, "No images found in the colmap model"
         return out
 
@@ -265,9 +292,10 @@ class SagsDataParser(DataParser):
         camera_type = CAMERA_MODEL_TO_TYPE[meta["camera_model"]]
 
         image_filenames = []
-        mask_filenames = []
+        masks_filenames = []
         feature_filenames = []
         color_filenames = []
+        semantic_masks_filenames = []
 
         poses = []
 
@@ -299,16 +327,18 @@ class SagsDataParser(DataParser):
 
             image_filenames.append(Path(frame["file_path"]))
             poses.append(frame["transform_matrix"])
-            if "mask_path" in frame:
-                mask_filenames.append(Path(frame["mask_path"]))
-            if "feature_path" in frame:
-                feature_filenames.append(Path(frame["feature_path"]))
+            if "masks_path" in frame:
+                masks_filenames.append(Path(frame["masks_path"]))
+            if "depths_path" in frame:
+                feature_filenames.append(Path(frame["depths_path"]))
             if "color_path" in frame:
                 color_filenames.append(Path(frame["color_path"]))
+            if "semantic_masks_path" in frame:
+                semantic_masks_filenames.append(Path(frame["semantic_masks_path"]))
 
-        assert len(mask_filenames) == 0 or (len(mask_filenames) == len(image_filenames)), """
-        Different number of image and mask filenames.
-        You should check that mask_path is specified for every frame (or zero frames) in transforms.json.
+        assert len(semantic_masks_filenames) == 0 or (len(semantic_masks_filenames) == len(image_filenames)), """
+        Different number of image and semantic mask filenames.
+        You should check that masks_path is specified for every frame (or zero frames) in transforms.json.
         """
         assert len(feature_filenames) == 0 or (len(feature_filenames) == len(image_filenames)), """
         Different number of image and depth filenames.
@@ -330,14 +360,15 @@ class SagsDataParser(DataParser):
 
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
         indices = self._get_image_indices(image_filenames, split)
-        image_filenames, mask_filenames, color_filenames, downscale_factor = self._setup_downscale_factor(
-            image_filenames, mask_filenames, color_filenames
+        image_filenames, masks_filenames, color_filenames, downscale_factor, semantic_masks_filenames = self._setup_downscale_factor(
+            image_filenames, masks_filenames, color_filenames, semantic_masks_filenames
         )
 
         image_filenames = [image_filenames[i] for i in indices]
-        mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
-        color_filenames = [color_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
-        feature_filenames = [feature_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
+        masks_filenames = [masks_filenames[i] for i in indices] if len(masks_filenames) > 0 else []
+        color_filenames = [color_filenames[i] for i in indices] if len(color_filenames) > 0 else []
+        feature_filenames = [feature_filenames[i] for i in indices] if len(feature_filenames) > 0 else []
+        semantic_masks_filenames = [semantic_masks_filenames[i] for i in indices] if len(semantic_masks_filenames) > 0 else []
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         poses = poses[idx_tensor]
@@ -387,18 +418,21 @@ class SagsDataParser(DataParser):
         metadata = {}
         if self.config.load_pretrained_gs:
             metadata.update(self._load_3D_gaussians())
+        if self.config.load_3D_points:
+            # Load 3D points
+            metadata.update(self._load_3D_points(colmap_path, transform_matrix, scale_factor))
         
         
         dataparser_outputs = SagsDataparserOutput(
             image_filenames=image_filenames,
             cameras=cameras,
             scene_box=scene_box,
-            mask_filenames=mask_filenames if len(mask_filenames) > 0 else None,
+            semantic_masks_filenames=semantic_masks_filenames if len(semantic_masks_filenames) > 0 else None,
             feature_filenames = feature_filenames if len(feature_filenames) > 0 else None,
             color_filenames=color_filenames,
             dataparser_scale=scale_factor,
             dataparser_transform=transform_matrix,
-            metadata=metadata
+            metadata=metadata,
         )
         # meta data includes the Gaussian we want to use
         return dataparser_outputs
@@ -418,7 +452,73 @@ class SagsDataParser(DataParser):
         # resize the parameters to match the new number of points
         CONSOLE.log(f"[bold green] splat ply load successfully from {self.config.data/self.config.gaussian_path}")
         out = self.fetchPly(self.config.data/self.config.gaussian_path)
-        return {"points3D_xyz": out, "points3D_rgb": None}
+        return {"points3D_para": out}
+    
+    def _load_3D_points(self, colmap_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
+        if (colmap_path / "points3D.bin").exists():
+            colmap_points = colmap_utils.read_points3D_binary(colmap_path / "points3D.bin")
+        elif (colmap_path / "points3D.txt").exists():
+            colmap_points = colmap_utils.read_points3D_text(colmap_path / "points3D.txt")
+        else:
+            raise ValueError(f"Could not find points3D.txt or points3D.bin in {colmap_path}")
+        points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
+        points3D = (
+            torch.cat(
+                (
+                    points3D,
+                    torch.ones_like(points3D[..., :1]),
+                ),
+                -1,
+            )
+            @ transform_matrix.T
+        )
+        points3D *= scale_factor
+
+        # Load point colours
+        points3D_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
+        points3D_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
+        out = {
+            "points3D_xyz": points3D,
+            "points3D_rgb": points3D_rgb,
+            "points3D_error": torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32)),
+            "points3D_num_points2D": points3D_num_points,
+        }
+        if self.config.max_2D_matches_per_3D_point != 0:
+            if (colmap_path / "images.txt").exists():
+                im_id_to_image = colmap_utils.read_images_text(colmap_path / "images.txt")
+            elif (colmap_path / "images.bin").exists():
+                im_id_to_image = colmap_utils.read_images_binary(colmap_path / "images.bin")
+            else:
+                raise ValueError(f"Could not find images.txt or images.bin in {colmap_path}")
+            downscale_factor = self._downscale_factor
+            max_num_points = int(torch.max(points3D_num_points).item())
+            if self.config.max_2D_matches_per_3D_point > 0:
+                max_num_points = min(max_num_points, self.config.max_2D_matches_per_3D_point)
+            points3D_image_ids = []
+            points3D_image_xy = []
+            for p in colmap_points.values():
+                nids = np.array(p.image_ids, dtype=np.int64)
+                nxy_ids = np.array(p.point2D_idxs, dtype=np.int32)
+                if self.config.max_2D_matches_per_3D_point != -1:
+                    # Randomly sample 2D matches
+                    idxs = np.argsort(p.error)[: self.config.max_2D_matches_per_3D_point]
+                    nids = nids[idxs]
+                    nxy_ids = nxy_ids[idxs]
+                nxy = [im_id_to_image[im_id].xys[pt_idx] for im_id, pt_idx in zip(nids, nxy_ids)]
+                nxy = torch.from_numpy(np.stack(nxy).astype(np.float32))
+                nids = torch.from_numpy(nids)
+                assert len(nids.shape) == 1
+                assert len(nxy.shape) == 2
+                points3D_image_ids.append(
+                    torch.cat((nids, torch.full((max_num_points - len(nids),), -1, dtype=torch.int64)))
+                )
+                points3D_image_xy.append(
+                    torch.cat((nxy, torch.full((max_num_points - len(nxy), nxy.shape[-1]), 0, dtype=torch.float32)))
+                    / downscale_factor
+                )
+            out["points3D_image_ids"] = torch.stack(points3D_image_ids, dim=0)
+            out["points3D_points2D_xy"] = torch.stack(points3D_image_xy, dim=0)
+        return out
 
     def _downscale_images(
         self,
@@ -461,7 +561,7 @@ class SagsDataParser(DataParser):
         CONSOLE.log("[bold green]:tada: Done downscaling images.")
 
     def _setup_downscale_factor(
-        self, image_filenames: List[Path], mask_filenames: List[Path], color_filenames: List[Path]
+        self, image_filenames: List[Path], masks_filenames: List[Path], color_filenames: List[Path], semantic_masks_filenames: List[Path]
     ):
         """
         Setup the downscale factor for the dataset. This is used to downscale the images and cameras.
@@ -510,10 +610,10 @@ class SagsDataParser(DataParser):
                         self.config.downscale_rounding_mode,
                         nearest_neighbor=False,
                     )
-                    if len(mask_filenames) > 0:
+                    if len(masks_filenames) > 0:
                         assert self.config.masks_path is not None
                         self._downscale_images(
-                            mask_filenames,
+                            masks_filenames,
                             partial(get_fname, self.config.data / self.config.masks_path),
                             self._downscale_factor,
                             self.config.downscale_rounding_mode,
@@ -522,8 +622,17 @@ class SagsDataParser(DataParser):
                     if len(color_filenames) > 0:
                         assert self.config.masks_path is not None
                         self._downscale_images(
-                            mask_filenames,
+                            masks_filenames,
                             partial(get_fname, self.config.data / self.config.masks_path),
+                            self._downscale_factor,
+                            self.config.downscale_rounding_mode,
+                            nearest_neighbor=True,
+                        )
+                    if len(semantic_masks_filenames) > 0:
+                        assert self.config.masks_path is not None
+                        self._downscale_images(
+                            semantic_masks_filenames,
+                            partial(get_fname, self.config.data / self.config.semantic_masks_path),
                             self._downscale_factor,
                             self.config.downscale_rounding_mode,
                             nearest_neighbor=True,
@@ -534,13 +643,16 @@ class SagsDataParser(DataParser):
         # Return transformed filenames
         if self._downscale_factor > 1:
             image_filenames = [get_fname(self.config.data / self.config.images_path, fp) for fp in image_filenames]
-            if len(mask_filenames) > 0:
+            if len(masks_filenames) > 0:
                 assert self.config.masks_path is not None
-                mask_filenames = [get_fname(self.config.data / self.config.masks_path, fp) for fp in mask_filenames]
+                masks_filenames = [get_fname(self.config.data / self.config.masks_path, fp) for fp in masks_filenames]
             if len(color_filenames) > 0:
                 assert self.config.masks_path is not None
                 color_filenames = [get_fname(self.config.data / self.config.masks_path, fp) for fp in color_filenames]
+            if len(semantic_masks_filenames) > 0:
+                assert self.config.semantic_masks_path is not None
+                semantic_masks_filenames = [get_fname(self.config.data / self.config.semantic_masks_path, fp) for fp in semantic_masks_filenames]
 
         assert isinstance(self._downscale_factor, int)
-        return image_filenames, mask_filenames, color_filenames, self._downscale_factor
+        return image_filenames, masks_filenames, color_filenames, self._downscale_factor, semantic_masks_filenames
 

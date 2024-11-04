@@ -107,4 +107,4 @@ def gaussian_split_call_back(
 def gaussian_loss(
         gaussian_attributes,
         mask_map, 
-)
+):

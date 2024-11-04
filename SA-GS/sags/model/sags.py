@@ -25,6 +25,8 @@ from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
+from pathlib import Path
+import csv
 from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
 
 try:
@@ -34,6 +36,7 @@ except ImportError:
 from gsplat.cuda_legacy._wrapper import num_sh_bases
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
+from nerfstudio.data.scene_box import OrientedBox
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
 from nerfstudio.cameras.cameras import Cameras
@@ -164,6 +167,8 @@ class SagsConfig(ModelConfig):
     """stop splitting at this step"""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
+    packed: bool = False
+    """Whether to use packed mode which is more memory efficient but might or might not be as fast. Default is True"""
     use_scale_regularization: bool = False
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     max_gauss_ratio: float = 10.0
@@ -184,6 +189,9 @@ class SagsConfig(ModelConfig):
     """
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
+    perplexity_path: Path = Path("/data/butian/GauUscene/GauU_Scene/CUHK_LOWER_CAMPUS_COLMAP/fake_geometric_complexity.csv")
+    """geometry comlexity csv file location"""
+    
 
 
 class Sags(Model):
@@ -416,11 +424,11 @@ class Sags(Model):
         with torch.no_grad():
             # keep track of a moving average of grad norms
             visible_mask = (self.radii > 0).flatten()
-            grads = self.xys.absgrad[0][visible_mask].norm(dim=-1)  # type: ignore
+            grads = self.xys.absgrad[visible_mask].norm(dim=-1) if self.config.packed else self.xys.absgrad[0][visible_mask].norm(dim=-1) # type: ignore
             # print(f"grad norm min {grads.min().item()} max {grads.max().item()} mean {grads.mean().item()} size {grads.shape}")
             if self.xys_grad_norm is None:
-                self.xys_grad_norm = torch.zeros(self.num_points, device=self.device, dtype=torch.float32)
-                self.vis_counts = torch.ones(self.num_points, device=self.device, dtype=torch.float32)
+                self.xys_grad_norm = torch.zeros(self.Means2D.shape[0], device=self.device, dtype=torch.float32) if self.config.packed else torch.zeros(self.num_points, device=self.device, dtype=torch.float32)
+                self.vis_counts = torch.ones(self.Means2D.shape[0], device=self.device, dtype=torch.float32) if self.config.packed else torch.ones(self.num_points, device=self.device, dtype=torch.float32)
             assert self.vis_counts is not None
             self.vis_counts[visible_mask] += 1
             self.xys_grad_norm[visible_mask] += grads
@@ -717,6 +725,14 @@ class Sags(Model):
                 )
         else:
             crop_ids = None
+        
+        if crop_ids is not None:
+            print(f"crop_ids: {crop_ids}, sum: {crop_ids.sum()}")
+            if crop_ids.sum() == 0:
+                print("Warning: No points within the crop box, returning empty outputs.")
+                return self.get_empty_outputs(
+                    int(camera.width.item()), int(camera.height.item()), self.background_color
+                )
 
         if crop_ids is not None:
             opacities_crop = self.opacities[crop_ids]
@@ -756,9 +772,9 @@ class Sags(Model):
         if self.config.sh_degree > 0:
             sh_degree_to_use = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
         else:
-            colors_crop = torch.sigmoid(colors_crop)
+            colors_crop = torch.sigmoid(colors_crop).squeeze(1)  # [N, 1, 3] -> [N, 3]
             sh_degree_to_use = None
-
+            
         render, alpha, info = rasterization(
             means=means_crop,
             quats=quats_crop / quats_crop.norm(dim=-1, keepdim=True),
@@ -770,7 +786,7 @@ class Sags(Model):
             width=W,
             height=H,
             tile_size=BLOCK_WIDTH,
-            packed=False,
+            packed=self.config.packed,
             near_plane=0.01,
             far_plane=1e10,
             render_mode=render_mode,
@@ -781,12 +797,15 @@ class Sags(Model):
             # set some threshold to disregrad small gaussians for faster rendering.
             # radius_clip=3.0,
         )
+        # if "gaussian_ids" not in info or info["gaussian_ids"] is None:
+        #     raise ValueError("The rasterization function did not produce valid 'gaussian_ids'.")
         if self.training and info["means2d"].requires_grad:
             info["means2d"].retain_grad()
         self.xys = info["means2d"]  # [1, N, 2]
-        self.radii = info["radii"][0]  # [N]
+        self.radii = info["radii"] if self.config.packed else info["radii"][0]  # [N]
         self.gaussian_ids = info["gaussian_ids"]
         self.flatten_ids = info["flatten_ids"]
+        self.Means2D = info["means2d"]
         alpha = alpha[:, ...]
 
         background = self._get_background_color()
@@ -888,49 +907,85 @@ class Sags(Model):
         real_shape_dict = {}
 
         for gs_id in self.gaussian_ids:
-            flatten_id = self.flatten_ids[gs_id]
-            real_shape_dict[gs_id] = self.scales[flatten_id] # is it in format (label, x/y, x/z)? Perhaps need modification here.
-        
+            gs_key = gs_id.item()
+            if 0 <= gs_key < len(self.flatten_ids):
+                flatten_id = self.flatten_ids[gs_id]
+                if 0 <= flatten_id.item() < len(self.scales):
+                    real_shape_dict[gs_key] = self.scales[flatten_id] # is it in format (label, x/y, x/z)? Perhaps need modification here.
+                else:
+                    real_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+            else:
+                real_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
         return real_shape_dict
     
     def _get_expected_shape(self, mask_with_shape:torch.tensor) -> Dict:
         ''' Establish a dictionary where gaussian_ids are keys to query their expected shapes in format (label, x/y, x/z)
-        
         Args: 
-            mask_with_shape: a tensor obj of (H,W,3).
-        
+            mask_with_shape: a tensor obj of (H, W, 3).
         Outputs:
             expected_shape_dict: a dictionary where gaussian_ids are keys and their shapes of (label, x/y, x/z) are values.
         '''
-        assert self.gaussian_ids != None, "Empty gaussian_ids during evaluation."
-        
+        assert self.gaussian_ids is not None, "Empty gaussian_ids during evaluation."
         expected_shape_dict = {}
 
         for gs_id in self.gaussian_ids:
-            flatten_id = self.flatten_ids[gs_id]
-            means2d_id = self.xys[flatten_id]
-            expected_shape_dict[gs_id] = mask_with_shape[means2d_id]
+            gs_key = gs_id.item()
+            # Ensure gs_id is within the correct range
+            if 0 <= gs_key < len(self.flatten_ids):
+                flatten_id = self.flatten_ids[gs_id]
+                # Ensure flatten_id is within bounds for self.xys
+                if 0 <= flatten_id.item() < len(self.xys):
+                    means2d_id = self.xys[flatten_id].long()  # Ensure tensor is of long type for indexing
+            
+                    # Ensure means2d_id is within bounds for mask_with_shape
+                    if 0 <= means2d_id[0].item() < mask_with_shape.shape[0] and 0 <= means2d_id[1].item() < mask_with_shape.shape[1]:
+                        # Convert means2d_id to integer indices
+                        row_idx = means2d_id[0].item()
+                        col_idx = means2d_id[1].item()
+                        # Index into mask_with_shape
+                        expected_shape_dict[gs_key] = mask_with_shape[row_idx, col_idx]
+                    else:
+                        expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+                else:
+                    expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
+            else:
+                expected_shape_dict[gs_key] = torch.zeros(3, dtype=torch.float, device='cuda')
 
         return expected_shape_dict
 
     def _get_mask_with_shape(self, mask:torch.tensor) -> torch.Tensor:
-        ''' Create a (H,W,3) mask where "3" implys label, x/y, x/z accordingly. Used for evaluation.
-
+        ''' Create a (H, W, 3) mask where "3" implies label, x/y, x/z accordingly. Used for evaluation.
+    
         Args:
-            mask: a tensor obj in shape of (H,W,1).
-        
+            mask: a tensor object in shape of (H, W, 1).
+    
         Outputs: 
-            mask_with_shape: a tensor obj (H,W,3).
+            mask_with_shape: a tensor object in shape of (H, W, 3).
         '''
-        mask_with_shape = torch.zeros((mask.shape[:2]+(3,)), dtype=torch.float)
-        mask_with_shape[:,:,0] = mask.squeeze(-1) # copy labels in mask to the new mask
-        H = mask_with_shape.shape(0)
-        W = mask_with_shape.shape(1)
-        for h in range(H):
-            for w in range(W):
-                x,y,z = self.means[(h,w)] #query 3d location by (h,w) on mask
-                mask_with_shape[(h,w,1)] = x/y
-                mask_with_shape[(h,w,2)] = x/z
+        # Initialize the mask_with_shape tensor
+        mask_with_shape = torch.zeros((mask.shape[0], mask.shape[1], 3), dtype=torch.float, device=mask.device)
+        mask_with_shape[:, :, 0] = mask.squeeze(-1)  # Copy labels in mask to the new mask
+    
+        # Flatten the H, W indices to create a 1D index tensor
+        H, W = mask.shape[:2]
+        indices = torch.arange(H * W, device=mask.device).view(H, W)
+    
+        # Ensure means tensor is properly expanded or truncated to match H * W if necessary
+        means_padded = torch.zeros((H * W, 3), device=self.means.device, dtype=self.means.dtype)
+    
+        if self.means.shape[0] >= H * W:
+            means_padded = self.means[:H * W]  
+        else:
+            means_padded[:self.means.shape[0]] = self.means  
+    
+        # Extract x, y, z values from means tensor
+        x_values = means_padded[:, 0].view(H, W)
+        y_values = means_padded[:, 1].view(H, W)
+        z_values = means_padded[:, 2].view(H, W)
+    
+        # Compute x/y and x/z and assign them to the mask_with_shape tensor
+        mask_with_shape[:, :, 1] = x_values / (y_values + 1e-8)  
+        mask_with_shape[:, :, 2] = x_values / (z_values + 1e-8)
 
         return mask_with_shape
     
@@ -947,31 +1002,41 @@ class Sags(Model):
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
-        assert "mask" in batch, "batch['mask']: (H, W, 1) not found during loss calculation." # batch["mask"] : [H, W, 1]
-        mask = self._downscale_if_required(batch["mask"])
+        assert "semantic_masks" in batch, "batch['semantic_masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
+        mask = self._downscale_if_required(batch["semantic_masks"])
         mask = mask.to(self.device)
 
         # calculate loss1
-        assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
+        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
+        # gt_img_with_mask = gt_img * mask
+        # pred_img_with_mask = pred_img * mask
+        # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
+        
         gt_img_with_mask = gt_img * mask
         pred_img_with_mask = pred_img * mask
-        Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
 
+        Ll1 = torch.abs(gt_img - pred_img).mean()
+        if Ll1.dim() == 0:
+            Ll1 = Ll1.unsqueeze(0)
         # calculate the intensity img from depth img, the intensity is used for loss2
-        
+
         # calculate loss2
-        
-        expected_shape_dict = self._get_expected_shape(self._get_mask_with_shape(mask))
-        real_shape_dict = self._get_real_shape()
+        Ll2 = ((gt_img - pred_img)** 2).mean()
+
+        # expected_shape_dict = self._get_expected_shape(self._get_mask_with_shape(mask))
+        # real_shape_dict = self._get_real_shape()
 
 
-        total_diff = torch.zeros((3,), dtype=torch.float) # shape(3,)
-        for gs_id in self.gaussian_ids:
-            one_diff = torch.abs(expected_shape_dict[gs_id] - real_shape_dict[gs_id])
-            total_diff += one_diff
+        # total_diff = torch.zeros((3,), dtype=torch.float, device=self.device) # shape(3,)
+        # if len(self.gaussian_ids) > 0:
+        #     for gs_id in self.gaussian_ids:
+        #         gs_key = gs_id.item()
+        #         one_diff = torch.abs(expected_shape_dict[gs_key] - real_shape_dict[gs_key])
+        #         total_diff += one_diff
 
-        Ll2 = total_diff / len(self.gaussian_ids)
-
+        #     Ll2 = total_diff / len(self.gaussian_ids)
+        # else:
+        #     Ll2 = torch.zeros((3,), dtype=torch.float, device=self.device)
         # not used: 
         # depth_img = outputs["depth"]
         # intensity_img = self._get_intensity_matrix(depth_img)
@@ -991,13 +1056,29 @@ class Sags(Model):
             )
             scale_reg = 0.1 * scale_reg.mean()
         else:
-            scale_reg = torch.tensor(0.0).to(self.device)
+            scale_reg = torch.tensor(0.0, device=self.device).unsqueeze(0)
+            
+        ##################### Shape Regularization #######################
+        perplexity = self.form_perplexity_tensor(self.config.perplexity_path)
+        ##################### Shape Regularization #######################
+            
+        ############################################################################################
+        # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
+        ############################################################################################
+        # try:
+        #     shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, scalings=self.scales)
+        # except:
+        #     print("shape loss out of bound")
+        shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, self.scales)
+        ############################################################################################
+        # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
+        ############################################################################################
         
         loss_dict = {
             "loss1": Ll1,
             "loss2": Ll2,
-            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
-            "scale_reg": scale_reg
+            "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss + self.config.ssim_lambda * shape_loss,
+            "scale_reg": scale_reg,
         }
 
 
@@ -1054,3 +1135,84 @@ class Sags(Model):
         images_dict = {"img": combined_rgb}
 
         return metrics_dict, images_dict
+    
+    def form_perplexity_tensor(self, perplexity_path: str) -> torch.Tensor:
+    
+    # Open the file
+        with open(perplexity_path, mode='r') as file:
+            # Create a CSV reader object
+            csv_reader = csv.reader(file)
+
+            # Skip the header if it exists
+            next(csv_reader)
+
+            # Fetch the second row
+            second_row = next(csv_reader)  # This assumes the first call of next() skipped the header
+            second_row = [float(item) for item in second_row]
+
+            perplexity = torch.tensor(second_row)
+            return perplexity
+        
+        
+    def shape_constrain_loss(self, perplexity: torch.Tensor, semantic_mask: torch.Tensor, Means2D: torch.Tensor, scalings: torch.Tensor):
+        '''
+        Calculate a shape constraint loss based on the description provided.
+        
+        Arguments:
+        - perplexity: Tensor containing perplexity values.
+        - semantic_mask: Tensor of semantic masks.
+        - Means2D: Tensor containing means, assumed to be of shape [n, 2] where each row is [x, y].
+        - scalings: Tensor of scalings for Gaussian models.
+        - k1, k2: Scaling factors for the loss components.
+        '''
+        scalings = scalings[(self.radii > 0).flatten()] # Visible Mask
+        # Ensure all tensors are on the same device, ideally 'cuda' for GPU acceleration
+        k1=3
+        k2=1
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        perplexity = perplexity.to(device)
+        semantic_mask = semantic_mask.to(device)
+        Means2D = Means2D.squeeze(dim=0)[(self.radii > 0).flatten()].to(device)
+        scalings = scalings.to(device)
+        values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
+        shape = (499, 751)
+
+        # 随机生成包含指定值的浮点张量
+        semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
+
+        # Filter valid Gaussians, assuming Means2D is [n, 2] and all are valid if not exactly [0,0] (0, 0) is the initial value
+        # Calculate valid_indices considering [0,0] at the center of semantic_mask
+        valid_indices = ~(torch.all(Means2D == torch.tensor([0.0, 0.0], device=device), dim=1)) & \
+                        (Means2D[:, 0] >= 0) & (Means2D[:, 0] < semantic_mask.shape[0]) & \
+                        (Means2D[:, 1] >= 0) & (Means2D[:, 1] < semantic_mask.shape[1])
+
+        valid_means = Means2D[valid_indices]
+        # Convert mean coordinates to integer indices, ensuring they are within bounds
+        x = valid_means[:, 0].long()
+        y = valid_means[:, 1].long()
+        # Get masks and filter out -1 (indicating no calculation needed)
+        assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
+        assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
+
+        mask = semantic_mask[x, y]  # Note the order of indices [x,y]
+        valid_mask_indices = mask != -1
+        mask = mask[valid_mask_indices].long()
+
+        # Get valid perplexities using mask
+        # Filter valid scalings based on the mask
+        valid_scalings = scalings[valid_indices]
+        valid_scalings = valid_scalings[valid_mask_indices]
+        
+        a1 = valid_scalings[:, 0] / valid_scalings[:, 1]
+        a2 = valid_scalings[:, 0] / valid_scalings[:, 2]
+        # Compute the loss for each valid Gaussian
+        mask = mask - 1
+        p = perplexity[mask]
+        
+        loss_per_gaussian = torch.sigmoid(k1 / p - a1) + torch.sigmoid(k2 / p - a2)
+
+        # Return the average loss or handle cases where there are no valid Gaussians
+        return loss_per_gaussian.mean() if loss_per_gaussian.numel() > 0 else torch.tensor(0.0, device=device)
+    # Example usage:
+    # Assume you have initialized the tensors `perplexity`, `semantic_mask`, `Means2D`, and `scalings` appropriately.
+    # Call shape_constrain_loss(None, perplexity_tensor, semantic_mask_tensor, means2D_tensor, scalings_tensor)

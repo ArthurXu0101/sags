@@ -243,7 +243,7 @@ class SemanticDatamanager(DataManager, Generic[TDataset]):
 
 
         def undistort_idx(idx: int) -> Dict[str, torch.Tensor]:
-            data = dataset.get_data(idx) # retured a dictionary of data
+            data = dataset.get_sags_data(idx) # retured a dictionary of data
             # this inlude masks, features, colors, and so on
             camera = dataset.cameras[idx].reshape(())
 
