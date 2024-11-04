@@ -40,7 +40,7 @@ from typing_extensions import assert_never, TypeVar
 
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.configs.dataparser_configs import AnnotatedDataParserUnion
-from nerfstudio.data.datamanagers.base_datamanager import DataManager #, TDataset
+from nerfstudio.data.datamanagers.base_datamanager import DataManager # , TDataset
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from sags.data.SagsDataParser import SagsDataParserConfig
 from sags.data.SagsDataset import SagsDataset
@@ -83,7 +83,7 @@ class SagsDataManagerConfig(FullImageDatamanagerConfig):
     samples from the pool of all training cameras without replacement before a new round of sampling starts."""
 
 TDataset = TypeVar("TDataset", bound=SagsDataset, default=SagsDataset)
-
+a =0
 class SagsDataManager(DataManager, Generic[TDataset]):
     """
     A datamanager that outputs full images and cameras instead of raybundles. This makes the
@@ -221,7 +221,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             K, image, mask = _undistort_image(camera, distortion_params, data, image, K)
             data["image"] = torch.from_numpy(image)
             if mask is not None:
-                data["masks"] = mask
+                data["semantic_masks"] = mask
             dataset.cameras.fx[idx] = float(K[0, 0])
             dataset.cameras.fy[idx] = float(K[1, 1])
             dataset.cameras.cx[idx] = float(K[0, 2])
@@ -231,7 +231,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             return data
 
         CONSOLE.log(f"Caching / undistorting {split} images")
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             undistorted_images = list(
                 track(
                     executor.map(
@@ -248,16 +248,16 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         if cache_images_device == "gpu":
             for cache in undistorted_images:
                 cache["image"] = cache["image"].to(self.device)
-                if "mask" in cache:
-                    cache["mask"] = cache["mask"].to(self.device)
+                if "semantic_masks" in cache:
+                    cache["semantic_masks"] = cache["semantic_masks"].to(self.device)
                 if "depth" in cache:
                     cache["depth"] = cache["depth"].to(self.device)
                 self.train_cameras = self.train_dataset.cameras.to(self.device)
         elif cache_images_device == "cpu":
             for cache in undistorted_images:
                 cache["image"] = cache["image"].pin_memory()
-                if "mask" in cache:
-                    cache["mask"] = cache["mask"].pin_memory()
+                if "semantic_masks" in cache:
+                    cache["semantic_masks"] = cache["semantic_masks"].pin_memory()
                 self.train_cameras = self.train_dataset.cameras
         else:
             assert_never(cache_images_device)
@@ -418,8 +418,8 @@ def _undistort_image(
     image = image[y : y + h, x : x + w]
     if "depth_image" in data:
         data["depth_image"] = data["depth_image"][y : y + h, x : x + w]
-    if "masks" in data:
-        mask = data["masks"].numpy()
+    if "semantic_masks" in data:
+        mask = data["semantic_masks"].numpy()
         #mask = mask.astype(np.uint8) * 255
         assert mask.dtype == np.uint8, "expected uint8 format in mask."
         #assert len(mask.shape) == 2, "expected shape (H*W)." #xyh

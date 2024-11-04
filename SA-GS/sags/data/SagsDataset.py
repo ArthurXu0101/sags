@@ -16,7 +16,10 @@ class SagsDataset(InputDataset):
     @property
     def mask_filenames(self) -> List[Path]:
         return self._dataparser_outputs.mask_filenames
-
+    @property
+    def semantic_masks_filenames(self) -> List[Path]:
+        return self._dataparser_outputs.semantic_masks_filenames
+    
     @property
     def feature_filenames(self) -> List[Path]:
         return self._dataparser_outputs.feature_filenames
@@ -47,10 +50,10 @@ class SagsDataset(InputDataset):
         data = {"image_idx": image_idx, "image": image}
         
         # Load optional data (masks, features, colors) if paths are available
-        masks, features, colors = None, None, None
-        if self._dataparser_outputs.masks_path:
-            mask_filename = self.mask_filenames[image_idx]
-            masks = np.load(mask_filename) # ['arr_0'] if npz
+        semantic_masks, features, colors = None, None, None
+        if self._dataparser_outputs.semantic_masks_filenames:
+            semantic_masks_filenames = self.semantic_masks_filenames[image_idx]
+            semantic_masks = np.load(semantic_masks_filenames) # ['arr_0'] if npz
         if self._dataparser_outputs.feature_filenames:
             feature_filename = self.feature_filenames[image_idx]
             features = np.load(feature_filename) # ['arr_0']
@@ -60,26 +63,26 @@ class SagsDataset(InputDataset):
         
         # Optionally scale masks and colors if available
         if self.scale_factor != 1.0:
-            if masks is not None:
-                masks = zoom(masks, (1, self.scale_factor, self.scale_factor), order=0)
+            if semantic_masks is not None:
+                semantic_masks = zoom(semantic_masks, (1, self.scale_factor, self.scale_factor), order=0)
             if colors is not None:
                 colors = zoom(colors, (1, self.scale_factor, self.scale_factor), order=0)
                 
         # Convert data to torch tensors and add to the data dictionary
-        if masks is not None:
-            data["masks"] = torch.tensor(masks)
+        if semantic_masks is not None:
+            data["semantic_masks"] = torch.tensor(semantic_masks)
         if features is not None:
             data["features"] = torch.tensor(features)
         if colors is not None:
             data["colors"] = torch.tensor(colors)
         
         # Verify shapes for consistency if all data is available
-        if masks is not None and features is not None and colors is not None:
-            assert masks.shape[0] == colors.shape[0], (
-                f"Mask and color batch size mismatch! masks shape: {masks.shape}, colors shape: {colors.shape}"
+        if semantic_masks is not None and features is not None and colors is not None:
+            assert semantic_masks.shape[0] == colors.shape[0], (
+                f"semantic_masks and color batch size mismatch! masks shape: {semantic_masks.shape}, colors shape: {colors.shape}"
             )
-            assert masks.shape[0] == features.shape[0], (
-                f"Feature and mask batch size mismatch! masks shape: {masks.shape}, features shape: {features.shape}"
+            assert semantic_masks.shape[0] == features.shape[0], (
+                f"Feature and mask batch size mismatch! masks shape: {semantic_masks.shape}, features shape: {features.shape}"
             )
         
         metadata = self.get_metadata(data)

@@ -167,6 +167,8 @@ class SagsConfig(ModelConfig):
     """stop splitting at this step"""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
+    packed: bool = False
+    """Whether to use packed mode which is more memory efficient but might or might not be as fast. Default is True"""
     use_scale_regularization: bool = False
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     max_gauss_ratio: float = 10.0
@@ -422,11 +424,11 @@ class Sags(Model):
         with torch.no_grad():
             # keep track of a moving average of grad norms
             visible_mask = (self.radii > 0).flatten()
-            grads = self.xys.absgrad[0][visible_mask].norm(dim=-1)  # type: ignore
+            grads = self.xys.absgrad[visible_mask].norm(dim=-1) if self.config.packed else self.xys.absgrad[0][visible_mask].norm(dim=-1) # type: ignore
             # print(f"grad norm min {grads.min().item()} max {grads.max().item()} mean {grads.mean().item()} size {grads.shape}")
             if self.xys_grad_norm is None:
-                self.xys_grad_norm = torch.zeros(self.num_points, device=self.device, dtype=torch.float32)
-                self.vis_counts = torch.ones(self.num_points, device=self.device, dtype=torch.float32)
+                self.xys_grad_norm = torch.zeros(self.Means2D.shape[0], device=self.device, dtype=torch.float32) if self.config.packed else torch.zeros(self.num_points, device=self.device, dtype=torch.float32)
+                self.vis_counts = torch.ones(self.Means2D.shape[0], device=self.device, dtype=torch.float32) if self.config.packed else torch.ones(self.num_points, device=self.device, dtype=torch.float32)
             assert self.vis_counts is not None
             self.vis_counts[visible_mask] += 1
             self.xys_grad_norm[visible_mask] += grads
@@ -770,9 +772,9 @@ class Sags(Model):
         if self.config.sh_degree > 0:
             sh_degree_to_use = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
         else:
-            colors_crop = torch.sigmoid(colors_crop)
+            colors_crop = torch.sigmoid(colors_crop).squeeze(1)  # [N, 1, 3] -> [N, 3]
             sh_degree_to_use = None
-
+            
         render, alpha, info = rasterization(
             means=means_crop,
             quats=quats_crop / quats_crop.norm(dim=-1, keepdim=True),
@@ -784,7 +786,7 @@ class Sags(Model):
             width=W,
             height=H,
             tile_size=BLOCK_WIDTH,
-            packed=True,
+            packed=self.config.packed,
             near_plane=0.01,
             far_plane=1e10,
             render_mode=render_mode,
@@ -795,12 +797,12 @@ class Sags(Model):
             # set some threshold to disregrad small gaussians for faster rendering.
             # radius_clip=3.0,
         )
-        if "gaussian_ids" not in info or info["gaussian_ids"] is None:
-            raise ValueError("The rasterization function did not produce valid 'gaussian_ids'.")
+        # if "gaussian_ids" not in info or info["gaussian_ids"] is None:
+        #     raise ValueError("The rasterization function did not produce valid 'gaussian_ids'.")
         if self.training and info["means2d"].requires_grad:
             info["means2d"].retain_grad()
         self.xys = info["means2d"]  # [1, N, 2]
-        self.radii = info["radii"][0]  # [N]
+        self.radii = info["radii"] if self.config.packed else info["radii"][0]  # [N]
         self.gaussian_ids = info["gaussian_ids"]
         self.flatten_ids = info["flatten_ids"]
         self.Means2D = info["means2d"]
@@ -1000,12 +1002,12 @@ class Sags(Model):
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
-        assert "masks" in batch, "batch['masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
-        mask = self._downscale_if_required(batch["masks"])
+        assert "semantic_masks" in batch, "batch['semantic_masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
+        mask = self._downscale_if_required(batch["semantic_masks"])
         mask = mask.to(self.device)
 
         # calculate loss1
-        assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
+        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
         # gt_img_with_mask = gt_img * mask
         # pred_img_with_mask = pred_img * mask
         # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
@@ -1013,27 +1015,28 @@ class Sags(Model):
         gt_img_with_mask = gt_img * mask
         pred_img_with_mask = pred_img * mask
 
-        Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
+        Ll1 = torch.abs(gt_img - pred_img).mean()
         if Ll1.dim() == 0:
             Ll1 = Ll1.unsqueeze(0)
         # calculate the intensity img from depth img, the intensity is used for loss2
 
         # calculate loss2
+        Ll2 = ((gt_img - pred_img)** 2).mean()
 
-        expected_shape_dict = self._get_expected_shape(self._get_mask_with_shape(mask))
-        real_shape_dict = self._get_real_shape()
+        # expected_shape_dict = self._get_expected_shape(self._get_mask_with_shape(mask))
+        # real_shape_dict = self._get_real_shape()
 
 
-        total_diff = torch.zeros((3,), dtype=torch.float, device=self.device) # shape(3,)
-        if len(self.gaussian_ids) > 0:
-            for gs_id in self.gaussian_ids:
-                gs_key = gs_id.item()
-                one_diff = torch.abs(expected_shape_dict[gs_key] - real_shape_dict[gs_key])
-                total_diff += one_diff
+        # total_diff = torch.zeros((3,), dtype=torch.float, device=self.device) # shape(3,)
+        # if len(self.gaussian_ids) > 0:
+        #     for gs_id in self.gaussian_ids:
+        #         gs_key = gs_id.item()
+        #         one_diff = torch.abs(expected_shape_dict[gs_key] - real_shape_dict[gs_key])
+        #         total_diff += one_diff
 
-            Ll2 = total_diff / len(self.gaussian_ids)
-        else:
-            Ll2 = torch.zeros((3,), dtype=torch.float, device=self.device)
+        #     Ll2 = total_diff / len(self.gaussian_ids)
+        # else:
+        #     Ll2 = torch.zeros((3,), dtype=torch.float, device=self.device)
         # not used: 
         # depth_img = outputs["depth"]
         # intensity_img = self._get_intensity_matrix(depth_img)
@@ -1056,17 +1059,17 @@ class Sags(Model):
             scale_reg = torch.tensor(0.0, device=self.device).unsqueeze(0)
             
         ##################### Shape Regularization #######################
-        perplexity = self.form_perplexity_tensor(self.perplexity_path)
+        perplexity = self.form_perplexity_tensor(self.config.perplexity_path)
         ##################### Shape Regularization #######################
             
         ############################################################################################
         # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
         ############################################################################################
-        try:
-            shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, scalings=self.scales)
-        except:
-            print("shape loss out of bound")
-            
+        # try:
+        #     shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, scalings=self.scales)
+        # except:
+        #     print("shape loss out of bound")
+        shape_loss = self.shape_constrain_loss(perplexity, mask, self.Means2D, self.scales)
         ############################################################################################
         # At this position we will calculate the semantic-wise regularization term. Given Means2D  #
         ############################################################################################
@@ -1110,7 +1113,7 @@ class Sags(Model):
             outputs: Outputs of the model.
 
         Returns:
-            A dictionary of metric.
+            A dictionary of metrics.
         """
         gt_rgb = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         predicted_rgb = outputs["rgb"]
@@ -1133,7 +1136,7 @@ class Sags(Model):
 
         return metrics_dict, images_dict
     
-    def form_perplexity_tensor(perplexity_path: str) -> torch.Tensor:
+    def form_perplexity_tensor(self, perplexity_path: str) -> torch.Tensor:
     
     # Open the file
         with open(perplexity_path, mode='r') as file:
@@ -1151,7 +1154,7 @@ class Sags(Model):
             return perplexity
         
         
-    def shape_constrain_loss(perplexity: torch.Tensor, semantic_mask: torch.Tensor, Means2D: torch.Tensor, scalings: torch.Tensor, k1=3, k2=1):
+    def shape_constrain_loss(self, perplexity: torch.Tensor, semantic_mask: torch.Tensor, Means2D: torch.Tensor, scalings: torch.Tensor):
         '''
         Calculate a shape constraint loss based on the description provided.
         
@@ -1162,27 +1165,31 @@ class Sags(Model):
         - scalings: Tensor of scalings for Gaussian models.
         - k1, k2: Scaling factors for the loss components.
         '''
-
+        scalings = scalings[(self.radii > 0).flatten()] # Visible Mask
         # Ensure all tensors are on the same device, ideally 'cuda' for GPU acceleration
+        k1=3
+        k2=1
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         perplexity = perplexity.to(device)
         semantic_mask = semantic_mask.to(device)
-        Means2D = Means2D.to(device)
+        Means2D = Means2D.squeeze(dim=0)[(self.radii > 0).flatten()].to(device)
         scalings = scalings.to(device)
+        values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
+        shape = (499, 751)
+
+        # 随机生成包含指定值的浮点张量
+        semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
 
         # Filter valid Gaussians, assuming Means2D is [n, 2] and all are valid if not exactly [0,0] (0, 0) is the initial value
         # Calculate valid_indices considering [0,0] at the center of semantic_mask
         valid_indices = ~(torch.all(Means2D == torch.tensor([0.0, 0.0], device=device), dim=1)) & \
-                        (Means2D[:, 0] >= -semantic_mask.shape[0]//2) & (Means2D[:, 0] < semantic_mask.shape[0]//2) & \
-                        (Means2D[:, 1] >= -semantic_mask.shape[1]//2) & (Means2D[:, 1] < semantic_mask.shape[1]//2)
+                        (Means2D[:, 0] >= 0) & (Means2D[:, 0] < semantic_mask.shape[0]) & \
+                        (Means2D[:, 1] >= 0) & (Means2D[:, 1] < semantic_mask.shape[1])
 
         valid_means = Means2D[valid_indices]
-
         # Convert mean coordinates to integer indices, ensuring they are within bounds
-        x = valid_means[:, 0].long() + semantic_mask.shape[0] // 2
-        y = valid_means[:, 1].long() + semantic_mask.shape[1] // 2
-
-
+        x = valid_means[:, 0].long()
+        y = valid_means[:, 1].long()
         # Get masks and filter out -1 (indicating no calculation needed)
         assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
         assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
@@ -1191,18 +1198,17 @@ class Sags(Model):
         valid_mask_indices = mask != -1
         mask = mask[valid_mask_indices].long()
 
-        if mask.numel() == 0:
-            return torch.tensor(0.0, device=device)  # No valid data points to process
-
         # Get valid perplexities using mask
-        p = perplexity[mask]
-
         # Filter valid scalings based on the mask
-        valid_scalings = scalings[valid_indices][valid_mask_indices]
+        valid_scalings = scalings[valid_indices]
+        valid_scalings = valid_scalings[valid_mask_indices]
+        
         a1 = valid_scalings[:, 0] / valid_scalings[:, 1]
         a2 = valid_scalings[:, 0] / valid_scalings[:, 2]
-
         # Compute the loss for each valid Gaussian
+        mask = mask - 1
+        p = perplexity[mask]
+        
         loss_per_gaussian = torch.sigmoid(k1 / p - a1) + torch.sigmoid(k2 / p - a2)
 
         # Return the average loss or handle cases where there are no valid Gaussians
