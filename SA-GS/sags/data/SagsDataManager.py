@@ -386,8 +386,8 @@ def _undistort_image(
 ) -> Tuple[np.ndarray, np.ndarray, Optional[torch.Tensor]]:
     mask = None
     #TODO
-    assert camera.camera_type.item() != CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." #test for now
-    assert distortion_params[3] != 0, (  # test for now
+    assert camera.camera_type.item() == CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." #test for now
+    assert distortion_params[3] == 0, (  # test for now
             "We doesn't support the 4th Brown parameter for image undistortion, "
             "Only k1, k2, k3, p1, p2 can be non-zero."
     )

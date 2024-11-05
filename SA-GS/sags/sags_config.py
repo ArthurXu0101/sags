@@ -27,7 +27,7 @@ sags = MethodSpecification(
             datamanager=SagsDataManagerConfig(
                 _target=SagsDataManager[SagsDataset],
                 dataparser=SagsDataParserConfig(
-                    load_pretrained_gs=True,
+                    load_pretrained_gs=False,
                     max_2D_matches_per_3D_point=0,
                 ),
             ),

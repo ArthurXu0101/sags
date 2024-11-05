@@ -65,7 +65,7 @@ class SagsDataParserConfig(DataParserConfig):
     """Directory or explicit json file path specifying location of data. It should be a torch tensor dicts"""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
-    downscale_factor: Optional[int] = None
+    downscale_factor: Optional[int] = 1
     """How much to downscale images. If not set, images are chosen such that the max dimension is <1600px."""
     downscale_rounding_mode: Literal["floor", "round", "ceil"] = "floor"
     """How to round downscale image height and Image width."""
@@ -107,7 +107,7 @@ class SagsDataParserConfig(DataParserConfig):
     """Path to depth maps directory. If not set, depths are not loaded."""
     color_path: Optional[Path] = None
     """Path used for visualization in the viser (I suspect)"""
-    colmap_path: Path = Path("colmap/sparse/0")
+    colmap_path: Path = Path("colmap/0")
     """Path to the colmap reconstruction directory relative to the data path."""
     load_3D_points: bool = True
     """Whether to load the 3D points from the colmap reconstruction. This is helpful for Gaussian splatting and
