@@ -96,7 +96,11 @@ def resize_image(image: torch.Tensor, d: int):
 
     image = image.to(torch.float32)
     weight = (1.0 / (d * d)) * torch.ones((1, 1, d, d), dtype=torch.float32, device=image.device)
-    return tf.conv2d(image.permute(2, 0, 1)[:, None, ...], weight, stride=d).squeeze(1).permute(1, 2, 0)
+    if image.dim() == 3:
+        return tf.conv2d(image.permute(2, 0, 1)[:, None, ...], weight, stride=d).squeeze(1).permute(1, 2, 0)
+    else:
+        return tf.conv2d(image[None, None, ...], weight, stride=d).squeeze(0).squeeze(0)
+        
 
 
 @torch_compile()
@@ -189,7 +193,7 @@ class SagsConfig(ModelConfig):
     """
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
-    perplexity_path: Path = Path("/data/butian/GauUscene/GauU_Scene/CUHK_LOWER_CAMPUS_COLMAP/fake_geometric_complexity.csv")
+    perplexity_path: Path = Path("/data/butian/GauUscene/GauU_Scene/CUHK_LOWER_CAMPUS_COLMAP/geometric_complexity.csv")
     """geometry comlexity csv file location"""
     
 
@@ -1012,8 +1016,6 @@ class Sags(Model):
         # pred_img_with_mask = pred_img * mask
         # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
         
-        gt_img_with_mask = gt_img * mask
-        pred_img_with_mask = pred_img * mask
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
         if Ll1.dim() == 0:
@@ -1174,11 +1176,11 @@ class Sags(Model):
         semantic_mask = semantic_mask.to(device)
         Means2D = Means2D.squeeze(dim=0)[(self.radii > 0).flatten()].to(device)
         scalings = scalings.to(device)
-        values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
-        shape = (499, 751)
+        # values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
+        # shape = (499, 751)
 
-        # 随机生成包含指定值的浮点张量
-        semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
+        # # 随机生成包含指定值的浮点张量
+        # semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
 
         # Filter valid Gaussians, assuming Means2D is [n, 2] and all are valid if not exactly [0,0] (0, 0) is the initial value
         # Calculate valid_indices considering [0,0] at the center of semantic_mask

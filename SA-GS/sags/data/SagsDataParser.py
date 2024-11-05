@@ -35,7 +35,7 @@ from nerfstudio.cameras.cameras import CAMERA_MODEL_TO_TYPE, Cameras
 from rich.prompt import Confirm
 
 import sys
-MAX_AUTO_RESOLUTION = 2000
+MAX_AUTO_RESOLUTION = 6000
 
 
 @dataclass
@@ -101,7 +101,7 @@ class SagsDataParserConfig(DataParserConfig):
     """Path to images directory relative to the data path."""
     masks_path: Optional[Path] = None # Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
-    semantic_masks_path: Path = Path("masks")
+    semantic_masks_path: Path = Path("npz")
     """Path to semantic masks directory. If not set, masks are not loaded."""
     depths_path: Optional[Path] = None
     """Path to depth maps directory. If not set, depths are not loaded."""
@@ -196,7 +196,7 @@ class SagsDataParser(DataParser):
             frame.update(cameras[im_data.camera_id])
             if self.config.semantic_masks_path is not None:
                 frame["semantic_masks_path"] = (
-                    (self.config.data / self.config.semantic_masks_path / (im_data.name.split('.')[0]+'.npy')).as_posix()
+                    (self.config.data / self.config.semantic_masks_path / (im_data.name.split('.')[0]+'.npz')).as_posix()
                 )
             if self.config.depths_path is not None:
                 frame["depths_path"] = (

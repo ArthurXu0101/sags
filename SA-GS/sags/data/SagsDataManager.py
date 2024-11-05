@@ -124,7 +124,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
-        if len(self.train_dataset) > 1000 and self.config.cache_images == "gpu":
+        if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(
                 "Train dataset has over 500 images, overriding cache_images to cpu",
                 style="bold yellow",
@@ -231,7 +231,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             return data
 
         CONSOLE.log(f"Caching / undistorting {split} images")
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             undistorted_images = list(
                 track(
                     executor.map(
