@@ -31,7 +31,11 @@ sags = MethodSpecification(
                     max_2D_matches_per_3D_point=0,
                 ),
             ),
-            model=SagsConfig(),
+            model=SagsConfig(
+                cull_alpha_thresh=0.005,
+                continue_cull_post_densification=False,
+                densify_grad_thresh=0.0006,
+                ),
         ),
         optimizers={
         "means": {

@@ -53,7 +53,7 @@ class SagsDataset(InputDataset):
         semantic_masks, features, colors = None, None, None
         if self._dataparser_outputs.semantic_masks_filenames:
             semantic_masks_filenames = self.semantic_masks_filenames[image_idx]
-            semantic_masks = np.load(semantic_masks_filenames)['arr_0'] 
+            semantic_masks = np.load(semantic_masks_filenames)['arr_0']
         if self._dataparser_outputs.feature_filenames:
             feature_filename = self.feature_filenames[image_idx]
             features = np.load(feature_filename)['arr_0']
