@@ -7,7 +7,7 @@ from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.plugins.types import MethodSpecification
 
-
+from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from sags.data.SagsDataParser import SagsDataParserConfig
 from sags.data.SagsDataset import SagsDataset
 from sags.data.SagsDataManager import SagsDataManager, SagsDataManagerConfig
