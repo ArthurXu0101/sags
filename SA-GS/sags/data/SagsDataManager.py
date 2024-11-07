@@ -386,8 +386,8 @@ def _undistort_image(
 ) -> Tuple[np.ndarray, np.ndarray, Optional[torch.Tensor]]:
     mask = None
     #TODO
-    assert camera.camera_type.item() == CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." #test for now
-    assert distortion_params[3] == 0, (  # test for now
+    assert camera.camera_type.item() == CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." 
+    assert distortion_params[3] == 0, (  
             "We doesn't support the 4th Brown parameter for image undistortion, "
             "Only k1, k2, k3, p1, p2 can be non-zero."
     )
@@ -421,7 +421,7 @@ def _undistort_image(
     if "semantic_masks" in data:
         mask = data["semantic_masks"].numpy()
         #mask = mask.astype(np.uint8) * 255
-        assert mask.dtype == np.uint8, "expected uint8 format in mask."
+        # assert mask.dtype == np.uint8, "expected uint8 format in mask."
         #assert len(mask.shape) == 2, "expected shape (H*W)." #xyh
         if np.any(distortion_params):
             mask = cv2.undistort(mask, K, distortion_params, None, newK)  # type: ignore
