@@ -83,7 +83,6 @@ class SagsDataManagerConfig(FullImageDatamanagerConfig):
     samples from the pool of all training cameras without replacement before a new round of sampling starts."""
 
 TDataset = TypeVar("TDataset", bound=SagsDataset, default=SagsDataset)
-a =0
 class SagsDataManager(DataManager, Generic[TDataset]):
     """
     A datamanager that outputs full images and cameras instead of raybundles. This makes the
@@ -124,9 +123,9 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
-        if len(self.train_dataset) > 1000 and self.config.cache_images == "gpu":
+        if len(self.train_dataset) > 50 and self.config.cache_images == "gpu":
             CONSOLE.print(
-                "Train dataset has over 500 images, overriding cache_images to cpu",
+                "Train dataset has over 50 images, overriding cache_images to cpu",
                 style="bold yellow",
             )
             self.config.cache_images = "cpu"
@@ -231,7 +230,7 @@ class SagsDataManager(DataManager, Generic[TDataset]):
             return data
 
         CONSOLE.log(f"Caching / undistorting {split} images")
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             undistorted_images = list(
                 track(
                     executor.map(
@@ -386,8 +385,8 @@ def _undistort_image(
 ) -> Tuple[np.ndarray, np.ndarray, Optional[torch.Tensor]]:
     mask = None
     #TODO
-    assert camera.camera_type.item() != CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." #test for now
-    assert distortion_params[3] != 0, (  # test for now
+    assert camera.camera_type.item() == CameraType.PERSPECTIVE.value, "Please use PERSPECTIVE camera type." 
+    assert distortion_params[3] == 0, (  
             "We doesn't support the 4th Brown parameter for image undistortion, "
             "Only k1, k2, k3, p1, p2 can be non-zero."
     )
@@ -421,7 +420,7 @@ def _undistort_image(
     if "semantic_masks" in data:
         mask = data["semantic_masks"].numpy()
         #mask = mask.astype(np.uint8) * 255
-        assert mask.dtype == np.uint8, "expected uint8 format in mask."
+        # assert mask.dtype == np.uint8, "expected uint8 format in mask."
         #assert len(mask.shape) == 2, "expected shape (H*W)." #xyh
         if np.any(distortion_params):
             mask = cv2.undistort(mask, K, distortion_params, None, newK)  # type: ignore

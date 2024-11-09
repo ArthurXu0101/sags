@@ -96,7 +96,11 @@ def resize_image(image: torch.Tensor, d: int):
 
     image = image.to(torch.float32)
     weight = (1.0 / (d * d)) * torch.ones((1, 1, d, d), dtype=torch.float32, device=image.device)
-    return tf.conv2d(image.permute(2, 0, 1)[:, None, ...], weight, stride=d).squeeze(1).permute(1, 2, 0)
+    if image.dim() == 3:
+        return tf.conv2d(image.permute(2, 0, 1)[:, None, ...], weight, stride=d).squeeze(1).permute(1, 2, 0)
+    else:
+        return tf.conv2d(image[None, None, ...], weight, stride=d).squeeze(0).squeeze(0)
+        
 
 
 @torch_compile()
@@ -189,8 +193,6 @@ class SagsConfig(ModelConfig):
     """
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
-    perplexity_path: Path = Path("/data/butian/GauUscene/GauU_Scene/CUHK_LOWER_CAMPUS_COLMAP/fake_geometric_complexity.csv")
-    """geometry comlexity csv file location"""
     
 
 
@@ -206,7 +208,7 @@ class Sags(Model):
     def __init__(
         self,
         *args,
-        seed_points: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        seed_points: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ):
         self.seed_points = seed_points
@@ -215,41 +217,53 @@ class Sags(Model):
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
-        if self.seed_points is not None and not self.config.random_init:
-            means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
+        load_gs = True
+        if load_gs:
+            means = torch.nn.Parameter(self.seed_points[0]["means"]) 
+            self.xys_grad_norm = None
+            self.max_2Dsize = None
+            scales = torch.nn.Parameter(self.seed_points[0]["scales"].permute(1, 0))
+            quats = torch.nn.Parameter(self.seed_points[0]["quats"].permute(1, 0))
+            features_dc = torch.nn.Parameter(self.seed_points[0]["feature_dc"].permute(1, 0))
+            features_rest = torch.nn.Parameter(self.seed_points[0]["feature_rest"].permute(1, 0).flip(dims=[1]))
+            opacities = torch.nn.Parameter(self.seed_points[0]["opacities"].permute(1, 0))
+            features_rest = features_rest.reshape(means.shape[0], num_sh_bases(self.config.sh_degree)-1 , 3)
         else:
-            means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
-        self.xys_grad_norm = None
-        self.max_2Dsize = None
-        distances, _ = self.k_nearest_sklearn(means.data, 3)
-        distances = torch.from_numpy(distances)
-        # find the average of the three nearest neighbors for each point and use that as the scale
-        avg_dist = distances.mean(dim=-1, keepdim=True)
-        scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
-        num_points = means.shape[0] #shape (n, x, y, z)
-        quats = torch.nn.Parameter(random_quat_tensor(num_points))
-        dim_sh = num_sh_bases(self.config.sh_degree)
-
-        if (
-            self.seed_points is not None
-            and not self.config.random_init
-            # We can have colors without points.
-            and self.seed_points[1].shape[0] > 0
-        ):
-            shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
-            if self.config.sh_degree > 0:
-                shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
-                shs[:, 1:, 3:] = 0.0
+            if self.seed_points is not None and not self.config.random_init:
+                means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
             else:
-                CONSOLE.log("use color only optimization with sigmoid activation")
-                shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
-            features_dc = torch.nn.Parameter(shs[:, 0, :])
-            features_rest = torch.nn.Parameter(shs[:, 1:, :])
-        else:
-            features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
-            features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
+                means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
+            self.xys_grad_norm = None
+            self.max_2Dsize = None
+            distances, _ = self.k_nearest_sklearn(means.data, 3)
+            distances = torch.from_numpy(distances)
+            # find the average of the three nearest neighbors for each point and use that as the scale
+            avg_dist = distances.mean(dim=-1, keepdim=True)
+            scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
+            num_points = means.shape[0] #shape (n, x, y, z)
+            quats = torch.nn.Parameter(random_quat_tensor(num_points))
+            dim_sh = num_sh_bases(self.config.sh_degree)
 
-        opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
+            if (
+                self.seed_points is not None
+                and not self.config.random_init
+                # We can have colors without points.
+                and self.seed_points[1].shape[0] > 0
+            ):
+                shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
+                if self.config.sh_degree > 0:
+                    shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
+                    shs[:, 1:, 3:] = 0.0
+                else:
+                    CONSOLE.log("use color only optimization with sigmoid activation")
+                    shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
+                features_dc = torch.nn.Parameter(shs[:, 0, :])
+                features_rest = torch.nn.Parameter(shs[:, 1:, :])
+            else:
+                features_dc = torch.nn.Parameter(torch.rand(num_points, 3))
+                features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
+
+            opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
         self.gauss_params = torch.nn.ParameterDict(
             {
                 "means": means,
@@ -1002,18 +1016,10 @@ class Sags(Model):
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
-        assert "semantic_masks" in batch, "batch['semantic_masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
         mask = self._downscale_if_required(batch["semantic_masks"])
         mask = mask.to(self.device)
 
-        # calculate loss1
-        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
-        # gt_img_with_mask = gt_img * mask
-        # pred_img_with_mask = pred_img * mask
-        # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
         
-        gt_img_with_mask = gt_img * mask
-        pred_img_with_mask = pred_img * mask
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
         if Ll1.dim() == 0:
@@ -1174,11 +1180,11 @@ class Sags(Model):
         semantic_mask = semantic_mask.to(device)
         Means2D = Means2D.squeeze(dim=0)[(self.radii > 0).flatten()].to(device)
         scalings = scalings.to(device)
-        values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
-        shape = (499, 751)
+        # values = torch.tensor([0.0, 1.0, 2.0, -1.0], dtype=torch.float32)
+        # shape = (499, 751)
 
-        # 随机生成包含指定值的浮点张量
-        semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
+        # # 随机生成包含指定值的浮点张量
+        # semantic_mask = values[torch.randint(0, len(values), shape)].to(torch.float32).to(device)
 
         # Filter valid Gaussians, assuming Means2D is [n, 2] and all are valid if not exactly [0,0] (0, 0) is the initial value
         # Calculate valid_indices considering [0,0] at the center of semantic_mask
@@ -1191,8 +1197,8 @@ class Sags(Model):
         x = valid_means[:, 0].long()
         y = valid_means[:, 1].long()
         # Get masks and filter out -1 (indicating no calculation needed)
-        assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
-        assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
+        # assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
+        # assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
 
         mask = semantic_mask[x, y]  # Note the order of indices [x,y]
         valid_mask_indices = mask != -1
