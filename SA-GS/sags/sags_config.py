@@ -76,7 +76,7 @@ sags = MethodSpecification(
         },
     },
         viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-        vis="viewer_legacy+tensorboard",
+        vis="viewer+wandb",
     ),
     description="Semantic Feature Extraction Script, let us start to do the initialization of models",
 )
