@@ -1,4 +1,4 @@
-# LERF: Language Embedded Radiance Fields
+# SA-GS: Semantic-Aware Gaussian Splatting for Large Scene Reconstruction with Geometry Constrain
 This is the unofficial implementation for [SAGS](https://saliteta.github.io/SA-GS-public/).
 
 # Installation
