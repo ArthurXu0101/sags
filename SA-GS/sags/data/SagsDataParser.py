@@ -10,6 +10,7 @@ from typing import List, Literal, Optional, Type
 
 import numpy as np
 import torch
+import os
 from PIL import Image
 from nerfstudio.cameras import camera_utils
 from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
@@ -49,6 +50,9 @@ class SagsDataparserOutput(DataparserOutputs):
     
     semantic_masks_filenames: Path = Path("masks") # Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
+    
+    perplexity_path: Optional[Path] = None
+    """Path to masks directory. If not set, masks are not loaded."""
 
 @dataclass
 class SagsDataParserConfig(DataParserConfig):
@@ -57,15 +61,15 @@ class SagsDataParserConfig(DataParserConfig):
     _target: Type = field(default_factory=lambda: SagsDataParser)
     """target class to instantiate"""
     
-    load_pretrained_gs: bool = False
+    load_pretrained_gs: bool = True
     """If we need to load pretained Gaussian"""
-    gaussian_path: Path = Path("sparse_pc.ply")
+    gaussian_path: Path = Path("point_cloud/iteration_30000/point_cloud.ply")
     """3D gaussian checkpoint location"""
     data: Path = Path()
     """Directory or explicit json file path specifying location of data. It should be a torch tensor dicts"""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
-    downscale_factor: Optional[int] = None
+    downscale_factor: Optional[int] = 1
     """How much to downscale images. If not set, images are chosen such that the max dimension is <1600px."""
     downscale_rounding_mode: Literal["floor", "round", "ceil"] = "floor"
     """How to round downscale image height and Image width."""
@@ -97,19 +101,19 @@ class SagsDataParserConfig(DataParserConfig):
     """The interval between frames to use for eval. Only used when eval_mode is eval-interval."""
     depth_unit_scale_factor: float = 1e-3
     """Scales the depth values to meters. Default value is 0.001 for a millimeter to meter conversion."""
-    images_path: Path = Path("images")
+    images_path: Path = Path("../../images")
     """Path to images directory relative to the data path."""
     masks_path: Optional[Path] = None # Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
-    semantic_masks_path: Path = Path("npz")
+    semantic_masks_path: Path = Path("../../npz")
     """Path to semantic masks directory. If not set, masks are not loaded."""
     depths_path: Optional[Path] = None
     """Path to depth maps directory. If not set, depths are not loaded."""
     color_path: Optional[Path] = None
     """Path used for visualization in the viser (I suspect)"""
-    colmap_path: Path = Path("colmap/sparse/0")
+    colmap_path: Path = Path("")
     """Path to the colmap reconstruction directory relative to the data path."""
-    load_3D_points: bool = True
+    load_3D_points: bool = False
     """Whether to load the 3D points from the colmap reconstruction. This is helpful for Gaussian splatting and
     generally unused otherwise, but it's typically harmless so we default to True."""
     max_2D_matches_per_3D_point: int = 0
@@ -118,6 +122,7 @@ class SagsDataParserConfig(DataParserConfig):
     """Path to shapes for each scene. If not set, shapes are not loaded. xyh"""
     linear_map_path: Path = Path("linear_map")
     """Path to linear maps for each frame. If not set, linear maps are not loaded. xyh"""
+    perplexity_path : Path = Path("../../geometric_complexity.csv")
 
 
 class SagsDataParser(DataParser):
@@ -285,7 +290,7 @@ class SagsDataParser(DataParser):
 
     def _generate_dataparser_outputs(self, split: str = "train", **kwargs):
         assert self.config.data.exists(), f"Data directory {self.config.data} does not exist."
-        colmap_path = self.config.data / self.config.colmap_path
+        colmap_path = self.config.data #/ self.config.colmap_path
         assert colmap_path.exists(), f"Colmap path {colmap_path} does not exist."
 
         meta = self._get_all_images_and_cameras(colmap_path)
@@ -421,8 +426,7 @@ class SagsDataParser(DataParser):
         if self.config.load_3D_points:
             # Load 3D points
             metadata.update(self._load_3D_points(colmap_path, transform_matrix, scale_factor))
-        
-        
+            
         dataparser_outputs = SagsDataparserOutput(
             image_filenames=image_filenames,
             cameras=cameras,
@@ -433,6 +437,7 @@ class SagsDataParser(DataParser):
             dataparser_scale=scale_factor,
             dataparser_transform=transform_matrix,
             metadata=metadata,
+            perplexity_path=os.path.abspath((os.path.join(self.config.data, '../../geometric_complexity.csv')))
         )
         # meta data includes the Gaussian we want to use
         return dataparser_outputs
@@ -441,18 +446,38 @@ class SagsDataParser(DataParser):
         plydata = PlyData.read(path)
         vertices = plydata['vertex']
         out = {}
-        out["means"] = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-        out["scales"] = np.vstack([vertices['scale_0'], vertices['scale_1'], vertices['scale_2']])
-        out["quats"] = np.vstack([vertices['rot_0'], vertices['rot_1'], vertices['rot_2'], vertices['rot_3']])
-        out["opacities"] = np.vstack([vertices['opacity']])
+        out["means"] = torch.from_numpy(np.vstack([vertices['x'], vertices['y'], vertices['z']]).T)
+        out["scales"] = torch.from_numpy(np.vstack([vertices['scale_0'], vertices['scale_1'], vertices['scale_2']]))
+        out["quats"] = torch.from_numpy(np.vstack([vertices['rot_0'], vertices['rot_1'], vertices['rot_2'], vertices['rot_3']]))
+        out["opacities"] = torch.from_numpy(np.vstack([vertices['opacity']]))
+        out["feature_dc"] = torch.from_numpy(np.vstack([vertices['f_dc_0'], vertices['f_dc_1'], vertices['f_dc_2']]))
+        out["feature_rest"] = torch.from_numpy(np.vstack([
+            vertices['f_rest_0'], vertices['f_rest_1'], vertices['f_rest_2'],vertices['f_rest_3'], 
+            vertices['f_rest_4'], vertices['f_rest_5'],vertices['f_rest_6'], vertices['f_rest_7'], 
+            vertices['f_rest_8'],vertices['f_rest_9'], vertices['f_rest_10'], vertices['f_rest_11'],
+            vertices['f_rest_12'], vertices['f_rest_13'], vertices['f_rest_14'],vertices['f_rest_15'], 
+            vertices['f_rest_16'], vertices['f_rest_17'],vertices['f_rest_18'], vertices['f_rest_19'], 
+            vertices['f_rest_20'],vertices['f_rest_21'], vertices['f_rest_22'], vertices['f_rest_23'],
+            vertices['f_rest_24'], vertices['f_rest_25'], vertices['f_rest_26'],vertices['f_rest_27'], 
+            vertices['f_rest_28'], vertices['f_rest_29'],vertices['f_rest_30'], vertices['f_rest_31'], 
+            vertices['f_rest_32'],vertices['f_rest_33'], vertices['f_rest_34'], vertices['f_rest_35'],
+            vertices['f_rest_36'], vertices['f_rest_37'], vertices['f_rest_38'],vertices['f_rest_39'], 
+            vertices['f_rest_40'], vertices['f_rest_41'],vertices['f_rest_42'], vertices['f_rest_43'], 
+            vertices['f_rest_44']]
+            ))
 
         return out
 
     def _load_3D_gaussians(self) -> dict:
         # resize the parameters to match the new number of points
         CONSOLE.log(f"[bold green] splat ply load successfully from {self.config.data/self.config.gaussian_path}")
-        out = self.fetchPly(self.config.data/self.config.gaussian_path)
-        return {"points3D_para": out}
+        points3D = self.fetchPly(self.config.data/self.config.gaussian_path)
+        points3D_rgb = None
+        out = {
+            "points3D_xyz": points3D,
+            "points3D_rgb": points3D_rgb,
+        }
+        return out
     
     def _load_3D_points(self, colmap_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
         if (colmap_path / "points3D.bin").exists():

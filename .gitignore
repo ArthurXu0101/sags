@@ -5,3 +5,4 @@ SA-GS/outputs/
 SA-GS/sags.egg-info/
 nerfstudio.yaml
 outputs/
+origin.ply

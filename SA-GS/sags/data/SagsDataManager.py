@@ -83,7 +83,6 @@ class SagsDataManagerConfig(FullImageDatamanagerConfig):
     samples from the pool of all training cameras without replacement before a new round of sampling starts."""
 
 TDataset = TypeVar("TDataset", bound=SagsDataset, default=SagsDataset)
-a =0
 class SagsDataManager(DataManager, Generic[TDataset]):
     """
     A datamanager that outputs full images and cameras instead of raybundles. This makes the
@@ -124,9 +123,9 @@ class SagsDataManager(DataManager, Generic[TDataset]):
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
-        if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
+        if len(self.train_dataset) > 50 and self.config.cache_images == "gpu":
             CONSOLE.print(
-                "Train dataset has over 500 images, overriding cache_images to cpu",
+                "Train dataset has over 50 images, overriding cache_images to cpu",
                 style="bold yellow",
             )
             self.config.cache_images = "cpu"

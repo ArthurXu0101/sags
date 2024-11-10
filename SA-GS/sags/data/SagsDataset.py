@@ -28,6 +28,10 @@ class SagsDataset(InputDataset):
     def color_filenames(self) -> List[Path]:
         return self._dataparser_outputs.color_filenames
     
+    @property
+    def perplexity_path(self) -> Path:
+        return self._dataparser_outputs.perplexity_path
+    
     def get_sags_data(self, image_idx: int, image_type: Literal["uint8", "float32"] = "float32") -> Dict:
         """Returns the FeatureDataset data as a dictionary.
             The returned data should include the followings:
@@ -53,13 +57,15 @@ class SagsDataset(InputDataset):
         semantic_masks, features, colors = None, None, None
         if self._dataparser_outputs.semantic_masks_filenames:
             semantic_masks_filenames = self.semantic_masks_filenames[image_idx]
-            semantic_masks = np.load(semantic_masks_filenames)['arr_0'] 
+            semantic_masks = np.load(semantic_masks_filenames)['arr_0']
         if self._dataparser_outputs.feature_filenames:
             feature_filename = self.feature_filenames[image_idx]
             features = np.load(feature_filename)['arr_0']
         if self._dataparser_outputs.color_filenames:
             color_filename = self.color_filenames[image_idx]
             colors = np.load(color_filename)['arr_0']
+        if self._dataparser_outputs.perplexity_path:
+            perplexity_path = self.perplexity_path
         
         # Optionally scale masks and colors if available
         if self.scale_factor != 1.0:
@@ -75,6 +81,8 @@ class SagsDataset(InputDataset):
             data["features"] = torch.tensor(features)
         if colors is not None:
             data["colors"] = torch.tensor(colors)
+        if perplexity_path is not None:
+            data["perplexity_path"] = perplexity_path
         
         # Verify shapes for consistency if all data is available
         if semantic_masks is not None and features is not None and colors is not None:
