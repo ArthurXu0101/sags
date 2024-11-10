@@ -193,7 +193,6 @@ class SagsConfig(ModelConfig):
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
     
-    
 
 
 class Sags(Model):
@@ -1016,15 +1015,9 @@ class Sags(Model):
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
-        assert "semantic_masks" in batch, "batch['semantic_masks']: (H, W, 3) not found during loss calculation." # batch["mask"] : [H, W, 1]
         mask = self._downscale_if_required(batch["semantic_masks"])
         mask = mask.to(self.device)
 
-        # calculate loss1
-        # assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2], "mask/gt_img/pred_img shapes need to be the same."
-        # gt_img_with_mask = gt_img * mask
-        # pred_img_with_mask = pred_img * mask
-        # Ll1 = torch.abs(gt_img_with_mask - pred_img_with_mask).mean()
         
 
         Ll1 = torch.abs(gt_img - pred_img).mean()
@@ -1203,8 +1196,8 @@ class Sags(Model):
         x = valid_means[:, 0].long()
         y = valid_means[:, 1].long()
         # Get masks and filter out -1 (indicating no calculation needed)
-        assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
-        assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
+        # assert x.min() >= 0 and x.max() < semantic_mask.shape[0], "x indices are out of bounds"
+        # assert y.min() >= 0 and y.max() < semantic_mask.shape[1], "y indices are out of bounds"
 
         mask = semantic_mask[x, y]  # Note the order of indices [x,y]
         valid_mask_indices = mask != -1

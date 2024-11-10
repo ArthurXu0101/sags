@@ -122,7 +122,6 @@ class SagsDataParserConfig(DataParserConfig):
     """Path to shapes for each scene. If not set, shapes are not loaded. xyh"""
     linear_map_path: Path = Path("linear_map")
     """Path to linear maps for each frame. If not set, linear maps are not loaded. xyh"""
-    perplexity_path : Path = Path("../../geometric_complexity.csv")
 
 
 class SagsDataParser(DataParser):

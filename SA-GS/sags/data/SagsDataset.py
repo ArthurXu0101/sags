@@ -27,6 +27,10 @@ class SagsDataset(InputDataset):
     @property
     def color_filenames(self) -> List[Path]:
         return self._dataparser_outputs.color_filenames
+    @property
+    def perplexity_path(self) -> Path:
+        return self._dataparser_outputs.perplexity_path
+    
     
     @property
     def perplexity_path(self) -> Path:

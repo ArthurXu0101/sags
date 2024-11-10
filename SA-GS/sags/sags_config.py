@@ -27,11 +27,15 @@ sags = MethodSpecification(
             datamanager=SagsDataManagerConfig(
                 _target=SagsDataManager[SagsDataset],
                 dataparser=SagsDataParserConfig(
-                    load_pretrained_gs=True,
+                    load_pretrained_gs=False,
                     max_2D_matches_per_3D_point=0,
                 ),
             ),
-            model=SagsConfig(),
+            model=SagsConfig(
+                cull_alpha_thresh=0.005,
+                continue_cull_post_densification=False,
+                densify_grad_thresh=0.0006,
+                ),
         ),
         optimizers={
         "means": {
@@ -62,6 +66,12 @@ sags = MethodSpecification(
             "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
             "scheduler": ExponentialDecaySchedulerConfig(
                 lr_final=5e-7, max_steps=30000, warmup_steps=1000, lr_pre_warmup=0
+            ),
+        },
+        "bilateral_grid": {
+            "optimizer": AdamOptimizerConfig(lr=5e-3, eps=1e-15),
+            "scheduler": ExponentialDecaySchedulerConfig(
+                lr_final=1e-4, max_steps=30000, warmup_steps=1000, lr_pre_warmup=0
             ),
         },
     },
