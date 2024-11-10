@@ -122,6 +122,8 @@ class SagsDataParserConfig(DataParserConfig):
     """Path to shapes for each scene. If not set, shapes are not loaded. xyh"""
     linear_map_path: Path = Path("linear_map")
     """Path to linear maps for each frame. If not set, linear maps are not loaded. xyh"""
+    perplexity_path: Path = Path("../../geometric_complexity.csv")
+    """geometry comlexity csv file location"""
 
 
 class SagsDataParser(DataParser):
@@ -425,7 +427,8 @@ class SagsDataParser(DataParser):
         if self.config.load_3D_points:
             # Load 3D points
             metadata.update(self._load_3D_points(colmap_path, transform_matrix, scale_factor))
-            
+        
+        
         dataparser_outputs = SagsDataparserOutput(
             image_filenames=image_filenames,
             cameras=cameras,
