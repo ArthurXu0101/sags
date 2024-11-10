@@ -6,3 +6,5 @@ SA-GS/sags.egg-info/
 nerfstudio.yaml
 outputs/
 origin.ply
+SA-GS/build/
+SA-GS/sags/bug_exam_field.py

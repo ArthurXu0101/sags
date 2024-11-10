@@ -45,3 +45,7 @@ A common artifact in splatting is long, spikey gaussians. PhysGaussian proposes 
 ### Exporting splats as '.PLY'
 Gaussian splats can be exported as a .ply file which are ingestable by a variety of online web viewers. You can do this via the viewer, or
 Run 'python SA-GS/sags/exporter.py gaussian-splat --load-config <config> --output-dir exports/splat' 
+
+
+### COLMAP input camera porcessing
+We find input COLMAP camera will be convert to OPEN-GL format, and will be rescale and rotate. Currently, we might need to use OPEN-GL format one, but no need to rescale, centered, and rotate. Let test the rendered result.

@@ -38,6 +38,12 @@ from rich.prompt import Confirm
 import sys
 MAX_AUTO_RESOLUTION = 6000
 
+camera_transform_matrix = torch.tensor([
+        [ 1.,  0.,  0.,  0.],
+        [ 0.,  0., -1.,  0.],
+        [ 0.,  1.,  0.,  0.],
+        [ 0.,  0.,  0.,  1.]
+], dtype=torch.float32)
 
 @dataclass
 class SagsDataparserOutput(DataparserOutputs):
@@ -54,6 +60,7 @@ class SagsDataparserOutput(DataparserOutputs):
     perplexity_path: Optional[Path] = None
     """Path to masks directory. If not set, masks are not loaded."""
 
+# Input would be dataset/colmap/0 position
 @dataclass
 class SagsDataParserConfig(DataParserConfig):
     """Nerfstudio dataset config"""
@@ -75,11 +82,11 @@ class SagsDataParserConfig(DataParserConfig):
     """How to round downscale image height and Image width."""
     scene_scale: float = 1.0
     """How much to scale the region of interest by."""
-    orientation_method: Literal["pca", "up", "vertical", "none"] = "up"
+    orientation_method: Literal["pca", "up", "vertical", "none"] = "none"
     """The method to use for orientation."""
-    center_method: Literal["poses", "focus", "none"] = "poses"
+    center_method: Literal["poses", "focus", "none"] = "none"
     """The method to use to center the poses."""
-    auto_scale_poses: bool = True
+    auto_scale_poses: bool = False
     """Whether to automatically scale the poses to fit in +/- 1 bounding box."""
     assume_colmap_world_coordinate_convention: bool = True
     """Colmap optimized world often have y direction of the first camera pointing towards down direction,
@@ -186,14 +193,15 @@ class SagsDataParser(DataParser):
             w2c = np.concatenate([rotation, translation], 1)
             w2c = np.concatenate([w2c, np.array([[0, 0, 0, 1]])], 0)
             c2w = np.linalg.inv(w2c)
+            
             # Convert from COLMAP's camera coordinate system (OpenCV) to ours (OpenGL)
             c2w[0:3, 1:3] *= -1
             if self.config.assume_colmap_world_coordinate_convention:
                 # world coordinate transform: map colmap gravity guess (-y) to nerfstudio convention (+z)
+                # There is no scale change
                 c2w = c2w[np.array([0, 2, 1, 3]), :]
                 c2w[2, :] *= -1
-            
-
+    
             frame = {
                 "file_path": (self.config.data / self.config.images_path / im_data.name).as_posix(),
                 "transform_matrix": c2w,
@@ -232,7 +240,9 @@ class SagsDataParser(DataParser):
 
         out = {}
         out["frames"] = frames
-        if self.config.assume_colmap_world_coordinate_convention:
+        
+        # We might want to keep the colmap world coordinate convention
+        if self.config.assume_colmap_world_coordinate_convention: 
             # world coordinate transform: map colmap gravity guess (-y) to nerfstudio convention (+z)
             applied_transform = np.eye(4)[:3, :]
             applied_transform = applied_transform[np.array([0, 2, 1]), :]
@@ -351,18 +361,9 @@ class SagsDataParser(DataParser):
         You should check that depth_file_path is specified for every frame (or zero frames) in transforms.json.
         """
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
-        poses, transform_matrix = camera_utils.auto_orient_and_center_poses(
-            poses,
-            method=self.config.orientation_method,
-            center_method=self.config.center_method,
-        )
+        
 
-        # Scale poses
-        scale_factor = 1.0
-        if self.config.auto_scale_poses:
-            scale_factor /= float(torch.max(torch.abs(poses[:, :3, 3])))
-        scale_factor *= self.config.scale_factor
-        poses[:, :3, 3] *= scale_factor
+
 
         # Choose image_filenames and poses based on split, but after auto orient and scaling the poses.
         indices = self._get_image_indices(image_filenames, split)
@@ -378,6 +379,19 @@ class SagsDataParser(DataParser):
 
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         poses = poses[idx_tensor]
+        scale_factor = 1.0
+        if self.config.auto_scale_poses:
+            scale_factor /= float(torch.max(torch.abs(poses[:, :3, 3])))
+        scale_factor *= self.config.scale_factor
+        poses[:, :3, 3] *= scale_factor
+        
+        ####################################################################
+        _, transform_matrix = camera_utils.auto_orient_and_center_poses(
+            poses,
+            method=self.config.orientation_method,
+            center_method=self.config.center_method,
+        )
+        ####################################################################
 
         # in x,y,z order
         # assumes that the scene is centered at the origin
@@ -396,6 +410,7 @@ class SagsDataParser(DataParser):
         width = torch.tensor(width, dtype=torch.int32)[idx_tensor]
         distortion_params = torch.stack(distort, dim=0)[idx_tensor]
 
+        poses = torch.matmul(camera_transform_matrix, poses)
         cameras = Cameras(
             fx=fx,
             fy=fy,
@@ -444,11 +459,12 @@ class SagsDataParser(DataParser):
         # meta data includes the Gaussian we want to use
         return dataparser_outputs
 
-    def fetchPly(self, path):
+    def fetchPly(self, path, ):
         plydata = PlyData.read(path)
         vertices = plydata['vertex']
         out = {}
-        out["means"] = torch.from_numpy(np.vstack([vertices['x'], vertices['y'], vertices['z']]).T)
+        means = torch.from_numpy(np.vstack([vertices['x'], vertices['y'], vertices['z']]).T)
+        out["means"] = means
         out["scales"] = torch.from_numpy(np.vstack([vertices['scale_0'], vertices['scale_1'], vertices['scale_2']]))
         out["quats"] = torch.from_numpy(np.vstack([vertices['rot_0'], vertices['rot_1'], vertices['rot_2'], vertices['rot_3']]))
         out["opacities"] = torch.from_numpy(np.vstack([vertices['opacity']]))
@@ -473,7 +489,7 @@ class SagsDataParser(DataParser):
     def _load_3D_gaussians(self) -> dict:
         # resize the parameters to match the new number of points
         CONSOLE.log(f"[bold green] splat ply load successfully from {self.config.data/self.config.gaussian_path}")
-        points3D = self.fetchPly(self.config.data/self.config.gaussian_path)
+        points3D = self.fetchPly(self.config.data/self.config.gaussian_path, ) # output dictionary
         points3D_rgb = None
         out = {
             "points3D_xyz": points3D,

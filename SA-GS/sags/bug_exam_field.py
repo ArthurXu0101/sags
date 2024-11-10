@@ -1,152 +1,99 @@
-
-from semanticField.data.SemanticFieldDataManager import SemanticDataManagerConfig, SemanticDatamanager
-from semanticField.data.SemanticFieldDataParser import SemanticDataParserConfig
-from semanticField.data.SemanticFieldDataset import SemanticFieldDataset
-from semanticField.model.semanticField import SemanticFieldConfig, SemanticField, get_viewmat
-from nerfstudio.utils.rich_utils import CONSOLE, get_progress
-import torch
-from typing import Type, Dict, Union, List, Literal, Tuple
+from sags.data.SagsDataParser import SagsDataParserConfig, SagsDataParser
+from gsplat.rendering import rasterization
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
+import torch
+import torchvision.transforms.functional as TF
+
+def get_viewmat(optimized_camera_to_world):
+    """
+    function that converts c2w to gsplat world2camera matrix, using compile for some speed
+    """
+    R = optimized_camera_to_world[:, :3, :3]  # 3 x 3
+    T = optimized_camera_to_world[:, :3, 3:4]  # 3 x 1
+    # flip the z and y axes to align with gsplat conventions
+    R = R * torch.tensor([[[1, -1, -1]]], device=R.device, dtype=R.dtype)
+    # analytic matrix inverse to get world2camera matrix
+    R_inv = R.transpose(1, 2)
+    T_inv = -torch.bmm(R_inv, T)
+    viewmat = torch.zeros(R.shape[0], 4, 4, device=R.device, dtype=R.dtype)
+    viewmat[:, 3, 3] = 1.0  # homogenous
+    viewmat[:, :3, :3] = R_inv
+    viewmat[:, :3, 3:4] = T_inv
+    return viewmat
+
+transform_matrix = torch.tensor([
+        [ 1.,  0.,  0.,  0.],
+        [ 0.,  0., -1.,  0.],
+        [ 0.,  1.,  0.,  0.],
+        [ 0.,  0.,  0.,  1.]
+], dtype=torch.float32).cuda()
 
 
-'''
-    Ground Truth Does not contain any visuable question
-'''
-
-
-def query(text:List[str], 
-          text_token: torch.Tensor = None, 
-          attention_threshold: float = 0.5, 
-          centre: bool = False
-          ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """
-        Args:
-            text (str): one list strs to describe the points one wants to query. Its length is B
-            text_token (torch.Tensor): In the shape of (B,C) a text embedding one wants to query. If it is none, we will generate text token from text
-            attention_threshold (float): We will return all the point cloud if the attention score is larger then 0.5
-            centre(bool): If it is set to True, we will return multiple points, otherwise, we return the mean of all points 
-
-        Returns:
-            location List[(torch.Tensor)]: xyz location in my coordinates its length is B. Each tensor is in the shape of (N,3)
-            attention_score List[(torch.Tensor)]: the corresponding attention score of each points length is B. Each element is in the shape of (N,)
-      """
-        
-
-class Evaluator:
-    def __init__(self, dataManagerConfig: SemanticDataManagerConfig, modelConfig: SemanticFieldConfig, features:torch.Tensor, device = 'cuda') -> None:
-        "set up the data manager, and take out the Gaussian model"
-        self.dataManager:SemanticDatamanager = dataManagerConfig.setup()
-        pts = self.dataManager.train_dataparser_outputs.metadata["points3D_xyz"]
-        pts_rgb = self.dataManager.train_dataparser_outputs.metadata["points3D_rgb"]
-        seed_pts = (pts, pts_rgb)
-        self.dataManager.to(device)
-        self.model = SemanticField(
-            config = modelConfig,
-            scene_box=self.dataManager.train_dataset.scene_box,
-            num_train_data=len(self.dataManager.train_dataset),
-            metadata=self.dataManager.train_dataset.metadata,
-            device=device,
-            seed_points=seed_pts,
-        )
-        self.model.gauss_params = torch.nn.ParameterDict(
-            {
-                "features": features.cuda(), # This is a (points_number, feature_dimension)
-                "colors": torch.zeros((features.shape[0],3)).cuda() # This is a (points number, 3)
-            }
-        )
-
-        self.model.to(device)
-
-    
-    def assert_feature_stable(self, gt_feature:torch.Tensor, text_embedding:torch.Tensor, step, name):
-        
-        H, W, C = gt_feature.shape
-        B,C = text_embedding.shape
-
-
-        # Reshape HWC_result to match the shape (H * W, C) for matrix multiplication
-        HWC_flattened = gt_feature.view(-1, C)  # (H*W, C)
-
-        # Perform matrix multiplication to get the attention map (b, H*W)
-        attention_map = torch.matmul(text_embedding.to(torch.float32), HWC_flattened.t())  # (b, H*W)
-
-        # Reshape attention map to (b, H, W)
-        attention_map = attention_map.view(B, H, W)
-
-        # Normalize the attention map to [0, 1]
-        attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min())
-
-        # Convert to CPU and detach from the graph for visualization
-        attention_map = attention_map.cpu().detach().numpy()
-
-        # Generate heatmap and save as PNG
-        for i in range(B):  # Loop through each batch element
-            plt.imshow(attention_map[i], cmap='viridis')  # Change cmap if needed
-            plt.colorbar()
-            plt.title(f'Attention Map for Batch {i}')
-            plt.savefig(f'/home/butian/workspace/outputs/debug/{name}_{step}_{i}.png')
-            plt.close()
-
-    
-    def train_iteration(self, step:int, text_embedding: torch.Tensor):
-        '''
-            For this part, we need to use the rasterization part of Gaussian
-        '''
-
-        camera_position, batch = self.dataManager.next_train(step)
-        gt_feature = batch['features_image']
-        outputs = self.model(camera_position)
-
-        self.assert_feature_stable(gt_feature=gt_feature, text_embedding = text_embedding, step=step, name='gt')
-        self.assert_feature_stable(gt_feature=outputs['features'], text_embedding = text_embedding, step=step, name='predict')
-        # we need to update gaussian ids expected result according to weight, and pixel IDs
-
-        del batch["features_image"]
-        del batch["colors_image"]
-
-    def train(self, text_embedding):
-
-        CONSOLE.print(f"There are {len(self.dataManager.train_unseen_cameras)} training camera left for update")
-        progress = get_progress(f"[cyan] Iterating...", suffix="iters/sec")
-        train_len = len(self.dataManager.train_unseen_cameras)
-
-        self.dataManager.cached_train[0]
-        
-        with progress as iterate_progress:
-            task = iterate_progress.add_task("training", total=train_len)
-
-            # Update the progress bar
-            for step in range(train_len):
-                self.train_iteration(step=step, text_embedding = text_embedding)
-                progress.update(task, advance=1)  # Advance the task by 1 step
-        
-
-
-if __name__ == '__main__':
-    datamanager=SemanticDataManagerConfig(
-        _target=SemanticDatamanager[SemanticFieldDataset],
-        dataparser=SemanticDataParserConfig(
-            data=Path('/home/butian/workspace/10F'),
-            load_pretrained_gs=True,
-            max_2D_matches_per_3D_point=0,
-        )
+BLOCK_WIDTH = 16
+# cameras can be iterate
+if __name__ == "__main__":
+    config = SagsDataParserConfig(
+        data=Path('/data2/butian/GauUscene/HAV_COLMAP/colmap/0')
     )
-
-    feature_embedding = torch.tensor(np.load('/home/butian/workspace/outputs/feature_splat_visualize/updated_optimizer.npz')['arr_0']).cuda()
-
-    trainer = Evaluator(
-        dataManagerConfig=datamanager,
-        features=feature_embedding,
-        modelConfig=SemanticFieldConfig()
+    
+    parser = SagsDataParser(config=config)
+    
+    output = parser.get_dataparser_outputs()
+    
+    camera = output.cameras[0:1]
+    
+    c2w = torch.eye(4).cuda()
+    
+    c2w[:3] = camera.camera_to_worlds.cuda()
+    #c2w = transform_matrix@c2w
+    viewmat = get_viewmat(c2w.unsqueeze(0))
+    viewmat = viewmat
+    
+    
+    point_cloud: dict = output.metadata['points3D_xyz']
+    
+    means = point_cloud['means'].cuda()
+    scales = point_cloud['scales'].T.cuda()
+    quats = point_cloud['quats'].T.cuda()
+    opacities = point_cloud['opacities'].T.cuda()
+    feature_dc = point_cloud['feature_dc'].T.cuda()
+    feature_rest = point_cloud['feature_rest'].T.reshape(feature_dc.shape[0],-1,3).cuda()
+    colors_crop = torch.cat((feature_dc[:, None, :], feature_rest), dim=1)
+    
+    K = camera.get_intrinsics_matrices().cuda()
+    W, H = int(camera.width.item()), int(camera.height.item())
+    print(output.image_filenames[0])
+    
+    render, alpha, info = rasterization(
+        means=means,
+        quats=quats / quats.norm(dim=-1, keepdim=True),
+        scales=torch.exp(scales),
+        opacities=torch.sigmoid(opacities).squeeze(-1),
+        colors=colors_crop,
+        viewmats=viewmat,  # [1, 4, 4]
+        Ks=K,  # [1, 3, 3]
+        width=W,
+        height=H,
+        tile_size=BLOCK_WIDTH,
+        packed=True,
+        near_plane=0.01,
+        far_plane=1e10,
+        render_mode="RGB",
+        sh_degree=3,
+        sparse_grad=False,
+        absgrad=True,
+        rasterize_mode='classic',
+        # set some threshold to disregrad small gaussians for faster rendering.
+        # radius_clip=3.0,
     )
-
-    text_embedding = torch.tensor(np.load('/home/butian/workspace/convert_gaussian/ground.npy')).cuda()
-
-    features = trainer.train(text_embedding)
+    render.clamp(0, 1)
+    render:torch.Tensor = render.squeeze()
     
-    CONSOLE.print(f"Training Accomplished")
-
+    image = TF.to_pil_image(render.permute(2,0,1))  # Convert to PIL image
+    image.save("output_image_1.jpg")    
     
-
+    
+    
+    
+    
+    
