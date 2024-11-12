@@ -12,3 +12,5 @@ include = ["sags*"]
 
 [project.entry-points.'nerfstudio.method_configs']
 sags = 'sags.sags_config:sags'
+sags-big = 'sags.sags_config:sags_big'
+sags-refine = 'sags.sags_config:sags_refine'
